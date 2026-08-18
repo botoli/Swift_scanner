@@ -1,0 +1,24 @@
+[package]
+name = "scanner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4"
+eframe = "0.31"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+jwalk = "0.8"
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["api-24", "directml", "load-dynamic", "ndarray", "std"] }
+rfd = "0.15"
+rusqlite = { version = "0.32", features = ["bundled"] }
+trash = "5.2"
+usearch = { version = "2.26", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
