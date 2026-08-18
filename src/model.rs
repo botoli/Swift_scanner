@@ -142,7 +142,7 @@ pub(crate) enum Assessment {
     Ordinary,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CleanupCategory {
     Temporary,
     Cache,
@@ -155,6 +155,36 @@ pub(crate) enum CleanupCategory {
     LargeOld,
     Protected,
     Ordinary,
+}
+
+impl CleanupCategory {
+    pub(crate) const FILTERABLE: [Self; 9] = [
+        Self::Temporary,
+        Self::Cache,
+        Self::Logs,
+        Self::CrashDump,
+        Self::Backup,
+        Self::Development,
+        Self::Installer,
+        Self::Archive,
+        Self::LargeOld,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Temporary => "Временные",
+            Self::Cache => "Кэш",
+            Self::Logs => "Логи",
+            Self::CrashDump => "Дампы",
+            Self::Backup => "Копии",
+            Self::Development => "Разработка",
+            Self::Installer => "Установщики",
+            Self::Archive => "Архивы",
+            Self::LargeOld => "Старые крупные",
+            Self::Protected => "Защищённые",
+            Self::Ordinary => "Обычные",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
