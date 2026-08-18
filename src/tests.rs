@@ -1,7 +1,7 @@
 use crate::CLEANUP_SCORE_THRESHOLD;
-use crate::filtering::file_matches;
+use crate::filtering::{file_matches, file_matches_category};
 use crate::index::FileIndex;
-use crate::model::{FileEntry, SortMode, SortRule, ViewMode};
+use crate::model::{CleanupCategory, FileEntry, SortMode, SortRule, ViewMode};
 use crate::visual_index::{
     is_supported_image, model_input_for_test, perceptual_hash_for_test, semantic_embedding_for_test,
 };
@@ -51,6 +51,7 @@ fn own_index_finds_path_substrings_and_keeps_size_order() {
         "reports",
         (0, u64::MAX),
         ViewMode::All,
+        None,
         SortRule {
             mode: SortMode::Size,
             descending: true,
@@ -65,6 +66,7 @@ fn own_index_finds_path_substrings_and_keeps_size_order() {
         "reports",
         (0, u64::MAX),
         ViewMode::All,
+        None,
         SortRule {
             mode: SortMode::Size,
             descending: true,
@@ -72,6 +74,51 @@ fn own_index_finds_path_substrings_and_keeps_size_order() {
         50,
     );
     assert_eq!(result, vec![1, 0]);
+    assert!(!has_more);
+}
+
+#[test]
+fn category_filter_matches_only_cleanup_candidates() {
+    let cache = FileEntry::new(
+        PathBuf::from(r"C:\Users\Test\Cache\preview.bin"),
+        1024,
+        None,
+    );
+    let ordinary = FileEntry::new(PathBuf::from(r"C:\Data\notes.txt"), 1024, None);
+
+    assert!(file_matches_category(&cache, None));
+    assert!(file_matches_category(&cache, Some(CleanupCategory::Cache)));
+    assert!(!file_matches_category(
+        &cache,
+        Some(CleanupCategory::Temporary)
+    ));
+    assert!(!file_matches_category(
+        &ordinary,
+        Some(CleanupCategory::Ordinary)
+    ));
+}
+
+#[test]
+fn own_index_filters_cleanup_category() {
+    let files = vec![
+        FileEntry::new(PathBuf::from(r"C:\Data\Cache\large.bin"), 2_000, None),
+        FileEntry::new(PathBuf::from(r"C:\Data\Temp\small.tmp"), 1_000, None),
+    ];
+    let index = FileIndex::build(&files);
+    let (result, has_more) = index.query_page(
+        &files,
+        "",
+        (0, u64::MAX),
+        ViewMode::Cleanup,
+        Some(CleanupCategory::Cache),
+        SortRule {
+            mode: SortMode::Size,
+            descending: true,
+        },
+        50,
+    );
+
+    assert_eq!(result, vec![0]);
     assert!(!has_more);
 }
 

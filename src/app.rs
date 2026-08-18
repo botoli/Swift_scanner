@@ -1,4 +1,6 @@
-use crate::filtering::{compare_file_entries, default_sort_descending, file_matches};
+use crate::filtering::{
+    compare_file_entries, default_sort_descending, file_matches, file_matches_category,
+};
 use crate::games::MiniGames;
 use crate::index::FileIndex;
 use crate::model::*;
@@ -40,6 +42,8 @@ struct ScannerApp {
     min_mb: String,
     max_mb: String,
     view: ViewMode,
+    category_filter: Option<CleanupCategory>,
+    category_stats: HashMap<CleanupCategory, (u64, u64)>,
     sort: SortRule,
     loaded_rows: usize,
     has_more_rows: bool,
@@ -93,6 +97,8 @@ impl ScannerApp {
             min_mb: String::new(),
             max_mb: String::new(),
             view: ViewMode::All,
+            category_filter: None,
+            category_stats: HashMap::new(),
             sort: SortRule {
                 mode: SortMode::Size,
                 descending: true,
@@ -152,6 +158,8 @@ impl ScannerApp {
         self.selected_rows.clear();
         self.selection_anchor = None;
         self.pending_bulk_delete = None;
+        self.category_filter = None;
+        self.category_stats.clear();
         self.file_index = None;
         self.index_receiver = None;
         self.image_engine = None;
@@ -211,6 +219,12 @@ impl ScannerApp {
                             self.analysis.cleanup_files += 1;
                             self.analysis.cleanup_bytes =
                                 self.analysis.cleanup_bytes.saturating_add(file.size);
+                            let stats = self
+                                .category_stats
+                                .entry(file.cleanup.category)
+                                .or_default();
+                            stats.0 = stats.0.saturating_add(1);
+                            stats.1 = stats.1.saturating_add(file.size);
                         }
                     }
                     let first_index = self.files.len();
@@ -504,6 +518,7 @@ impl ScannerApp {
                 &self.query,
                 bounds,
                 self.view,
+                self.category_filter,
                 self.sort,
                 self.loaded_rows,
             )
@@ -517,6 +532,7 @@ impl ScannerApp {
                 .iter()
                 .copied()
                 .filter(|index| file_matches(&self.files[*index], &normalized, bounds, self.view))
+                .filter(|index| file_matches_category(&self.files[*index], self.category_filter))
                 .collect::<Vec<_>>();
             visible.sort_unstable_by(|left, right| {
                 compare_file_entries(&self.files[*left], &self.files[*right], &[self.sort])
@@ -571,186 +587,208 @@ impl ScannerApp {
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("SPACE/INDEX")
-                            .size(10.0)
-                            .strong()
-                            .color(crate::BLUE),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new("LOCAL 0.3").size(9.0).color(crate::MUTED));
-                    });
-                });
-                ui.add_space(22.0);
-                ui.label(
-                    RichText::new("ОЧИСТКА ДИСКА")
-                        .size(21.0)
-                        .strong()
-                        .color(crate::INK),
-                );
-                ui.add_space(9.0);
-                ui.label(
-                    RichText::new("Поиск крупных файлов и мусора\nбез автоматического удаления.")
-                        .size(12.0)
-                        .color(crate::MUTED),
-                );
-                ui.add_space(22.0);
-                ui.separator();
-                ui.add_space(16.0);
-                ui.label(
-                    RichText::new("ОБЛАСТЬ СКАНИРОВАНИЯ")
-                        .size(9.0)
-                        .strong()
-                        .color(crate::MUTED),
-                );
-                ui.add_space(8.0);
-                egui::Frame::new()
-                    .fill(crate::SURFACE)
-                    .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
-                    .inner_margin(egui::Margin::same(12))
+                let content_height = (ui.available_height() - 58.0).max(80.0);
+                ScrollArea::vertical()
+                    .id_salt("sidebar-content")
+                    .auto_shrink([false, false])
+                    .max_height(content_height)
                     .show(ui, |ui| {
-                        ui.set_min_width(194.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("SPACE/INDEX")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(crate::BLUE),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new("LOCAL 0.3").size(9.0).color(crate::MUTED),
+                                    );
+                                },
+                            );
+                        });
+                        ui.add_space(22.0);
                         ui.label(
-                            RichText::new(short_path(&self.root))
-                                .size(11.0)
+                            RichText::new("ОЧИСТКА ДИСКА")
+                                .size(21.0)
+                                .strong()
                                 .color(crate::INK),
                         );
                         ui.add_space(9.0);
-                        if ui
-                            .button(RichText::new("ИЗМЕНИТЬ ПУТЬ  →").size(10.0))
-                            .clicked()
+                        ui.label(
+                            RichText::new(
+                                "Поиск крупных файлов и мусора\nбез автоматического удаления.",
+                            )
+                            .size(12.0)
+                            .color(crate::MUTED),
+                        );
+                        ui.add_space(22.0);
+                        ui.separator();
+                        ui.add_space(16.0);
+                        ui.label(
+                            RichText::new("ОБЛАСТЬ СКАНИРОВАНИЯ")
+                                .size(9.0)
+                                .strong()
+                                .color(crate::MUTED),
+                        );
+                        ui.add_space(8.0);
+                        egui::Frame::new()
+                            .fill(crate::SURFACE)
+                            .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
+                            .inner_margin(egui::Margin::same(12))
+                            .show(ui, |ui| {
+                                ui.set_min_width(194.0);
+                                ui.label(
+                                    RichText::new(short_path(&self.root))
+                                        .size(11.0)
+                                        .color(crate::INK),
+                                );
+                                ui.add_space(9.0);
+                                if ui
+                                    .button(RichText::new("ИЗМЕНИТЬ ПУТЬ  →").size(10.0))
+                                    .clicked()
+                                {
+                                    self.choose_folder();
+                                }
+                            });
+                        ui.add_space(20.0);
+                        ui.label(
+                            RichText::new("РАЗМЕР ФАЙЛОВ")
+                                .size(9.0)
+                                .strong()
+                                .color(crate::MUTED),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(
+                                    self.min_mb.is_empty(),
+                                    RichText::new("Все").size(11.0),
+                                )
+                                .clicked()
+                            {
+                                self.min_mb.clear();
+                                self.refresh_visible();
+                            }
+                            if ui
+                                .selectable_label(
+                                    self.min_mb == "100",
+                                    RichText::new("от 100 МБ").size(11.0),
+                                )
+                                .clicked()
+                            {
+                                self.min_mb = "100".to_owned();
+                                self.refresh_visible();
+                            }
+                            if ui
+                                .selectable_label(
+                                    self.min_mb == "1024",
+                                    RichText::new("от 1 ГБ").size(11.0),
+                                )
+                                .clicked()
+                            {
+                                self.min_mb = "1024".to_owned();
+                                self.refresh_visible();
+                            }
+                        });
+                        ui.add_space(12.0);
+                        ui.label(
+                            RichText::new("ТОЧНЫЙ ДИАПАЗОН / МБ")
+                                .size(9.0)
+                                .color(crate::MUTED),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let min_changed = ui
+                                .add_sized(
+                                    [93.0, 29.0],
+                                    egui::TextEdit::singleline(&mut self.min_mb).hint_text("От"),
+                                )
+                                .changed();
+                            ui.label(RichText::new("—").color(crate::MUTED));
+                            let max_changed = ui
+                                .add_sized(
+                                    [93.0, 29.0],
+                                    egui::TextEdit::singleline(&mut self.max_mb).hint_text("До"),
+                                )
+                                .changed();
+                            if min_changed || max_changed {
+                                self.refresh_visible();
+                            }
+                        });
+                        ui.add_space(20.0);
+                        ui.label(
+                            RichText::new("ПРОСМОТР")
+                                .size(9.0)
+                                .strong()
+                                .color(crate::MUTED),
+                        );
+                        ui.add_space(8.0);
+                        self.mode_tab(
+                            ui,
+                            ViewMode::All,
+                            "Все файлы".to_owned(),
+                            format!("{} объектов", format_count(self.stats.files)),
+                        );
+                        ui.add_space(6.0);
+                        self.mode_tab(
+                            ui,
+                            ViewMode::Cleanup,
+                            "Умная очистка".to_owned(),
+                            format!(
+                                "{} · {}",
+                                format_count(self.analysis.cleanup_files),
+                                format_bytes(self.analysis.cleanup_bytes)
+                            ),
+                        );
+                        if self.view == ViewMode::Cleanup
+                            && !self.games_open
+                            && !self.image_search_open
                         {
-                            self.choose_folder();
+                            self.category_chips(ui);
+                        }
+                        ui.add_space(6.0);
+                        self.image_search_tab(ui);
+
+                        ui.add_space(14.0);
+                        ui.label(
+                            RichText::new("РАЗВЛЕЧЕНИЯ")
+                                .size(8.0)
+                                .strong()
+                                .color(crate::MUTED),
+                        );
+                        ui.add_space(5.0);
+                        let games_button = egui::Button::new(
+                            RichText::new("МИНИ-ИГРЫ  /  12").size(11.0).strong().color(
+                                if self.games_open {
+                                    Color32::WHITE
+                                } else {
+                                    crate::INK
+                                },
+                            ),
+                        )
+                        .fill(if self.games_open {
+                            Color32::from_rgb(27, 49, 76)
+                        } else {
+                            crate::SURFACE
+                        })
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            if self.games_open {
+                                crate::BLUE
+                            } else {
+                                crate::LINE
+                            },
+                        ))
+                        .min_size(egui::Vec2::new(ui.available_width(), 38.0));
+                        if ui.add(games_button).clicked() {
+                            self.games_open = true;
+                            self.image_search_open = false;
                         }
                     });
-                ui.add_space(20.0);
-                ui.label(
-                    RichText::new("РАЗМЕР ФАЙЛОВ")
-                        .size(9.0)
-                        .strong()
-                        .color(crate::MUTED),
-                );
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(self.min_mb.is_empty(), RichText::new("Все").size(11.0))
-                        .clicked()
-                    {
-                        self.min_mb.clear();
-                        self.refresh_visible();
-                    }
-                    if ui
-                        .selectable_label(
-                            self.min_mb == "100",
-                            RichText::new("от 100 МБ").size(11.0),
-                        )
-                        .clicked()
-                    {
-                        self.min_mb = "100".to_owned();
-                        self.refresh_visible();
-                    }
-                    if ui
-                        .selectable_label(
-                            self.min_mb == "1024",
-                            RichText::new("от 1 ГБ").size(11.0),
-                        )
-                        .clicked()
-                    {
-                        self.min_mb = "1024".to_owned();
-                        self.refresh_visible();
-                    }
-                });
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new("ТОЧНЫЙ ДИАПАЗОН / МБ")
-                        .size(9.0)
-                        .color(crate::MUTED),
-                );
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let min_changed = ui
-                        .add_sized(
-                            [93.0, 29.0],
-                            egui::TextEdit::singleline(&mut self.min_mb).hint_text("От"),
-                        )
-                        .changed();
-                    ui.label(RichText::new("—").color(crate::MUTED));
-                    let max_changed = ui
-                        .add_sized(
-                            [93.0, 29.0],
-                            egui::TextEdit::singleline(&mut self.max_mb).hint_text("До"),
-                        )
-                        .changed();
-                    if min_changed || max_changed {
-                        self.refresh_visible();
-                    }
-                });
-                ui.add_space(20.0);
-                ui.label(
-                    RichText::new("ПРОСМОТР")
-                        .size(9.0)
-                        .strong()
-                        .color(crate::MUTED),
-                );
-                ui.add_space(8.0);
-                self.mode_tab(
-                    ui,
-                    ViewMode::All,
-                    "Все файлы".to_owned(),
-                    format!("{} объектов", format_count(self.stats.files)),
-                );
-                ui.add_space(6.0);
-                self.mode_tab(
-                    ui,
-                    ViewMode::Cleanup,
-                    "Умная очистка".to_owned(),
-                    format!(
-                        "{} · {}",
-                        format_count(self.analysis.cleanup_files),
-                        format_bytes(self.analysis.cleanup_bytes)
-                    ),
-                );
-                ui.add_space(6.0);
-                self.image_search_tab(ui);
-
-                ui.add_space(14.0);
-                ui.label(
-                    RichText::new("РАЗВЛЕЧЕНИЯ")
-                        .size(8.0)
-                        .strong()
-                        .color(crate::MUTED),
-                );
-                ui.add_space(5.0);
-                let games_button =
-                    egui::Button::new(RichText::new("МИНИ-ИГРЫ  /  12").size(11.0).strong().color(
-                        if self.games_open {
-                            Color32::WHITE
-                        } else {
-                            crate::INK
-                        },
-                    ))
-                    .fill(if self.games_open {
-                        Color32::from_rgb(27, 49, 76)
-                    } else {
-                        crate::SURFACE
-                    })
-                    .stroke(egui::Stroke::new(
-                        1.0_f32,
-                        if self.games_open {
-                            crate::BLUE
-                        } else {
-                            crate::LINE
-                        },
-                    ))
-                    .min_size(egui::Vec2::new(ui.available_width(), 38.0));
-                if ui.add(games_button).clicked() {
-                    self.games_open = true;
-                    self.image_search_open = false;
-                }
-
-                let spacer = (ui.available_height() - 64.0).max(14.0);
-                ui.add_space(spacer);
                 let label = if self.scanning {
                     "Остановить сканирование"
                 } else {
@@ -819,10 +857,79 @@ impl ScannerApp {
             .response;
         if response.interact(egui::Sense::click()).clicked() {
             self.view = mode;
+            if mode == ViewMode::All {
+                self.category_filter = None;
+            }
             self.games_open = false;
             self.image_search_open = false;
             self.refresh_visible();
         }
+    }
+
+    fn category_chips(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(12.0);
+        ui.label(
+            RichText::new("КАТЕГОРИИ")
+                .size(8.0)
+                .strong()
+                .color(crate::MUTED),
+        );
+        ui.add_space(5.0);
+        let all_selected = self.category_filter.is_none();
+        let all_button =
+            egui::Button::new(RichText::new("Все категории").size(10.0)).fill(if all_selected {
+                Color32::from_rgb(27, 49, 76)
+            } else {
+                crate::SURFACE
+            });
+        if ui
+            .add_sized([ui.available_width(), 28.0], all_button)
+            .clicked()
+            && !all_selected
+        {
+            self.category_filter = None;
+            self.refresh_visible();
+        }
+
+        ui.add_space(4.0);
+        let categories = CleanupCategory::FILTERABLE
+            .into_iter()
+            .filter_map(|category| {
+                self.category_stats
+                    .get(&category)
+                    .copied()
+                    .filter(|stats| stats.0 > 0)
+                    .map(|stats| (category, stats))
+            })
+            .collect::<Vec<_>>();
+        egui::Grid::new("cleanup-category-grid")
+            .num_columns(2)
+            .spacing([4.0, 4.0])
+            .show(ui, |ui| {
+                for (position, (category, (count, bytes))) in categories.iter().enumerate() {
+                    let selected = self.category_filter == Some(*category);
+                    let text = format!(
+                        "{}\n{} · {}",
+                        category.label(),
+                        format_count(*count),
+                        format_bytes(*bytes)
+                    );
+                    let button =
+                        egui::Button::new(RichText::new(text).size(9.0)).fill(if selected {
+                            Color32::from_rgb(27, 49, 76)
+                        } else {
+                            crate::SURFACE
+                        });
+                    if ui.add_sized([95.0, 42.0], button).clicked() && !selected {
+                        self.category_filter = Some(*category);
+                        self.view = ViewMode::Cleanup;
+                        self.refresh_visible();
+                    }
+                    if position % 2 == 1 {
+                        ui.end_row();
+                    }
+                }
+            });
     }
 
     fn image_search_tab(&mut self, ui: &mut egui::Ui) {
@@ -1055,9 +1162,13 @@ impl ScannerApp {
                     && self.min_mb.trim().is_empty()
                     && self.max_mb.trim().is_empty();
                 let result_count = if unfiltered {
-                    format_count(match self.view {
-                        ViewMode::All => self.stats.files,
-                        ViewMode::Cleanup => self.analysis.cleanup_files,
+                    format_count(match (self.view, self.category_filter) {
+                        (ViewMode::All, _) => self.stats.files,
+                        (ViewMode::Cleanup, Some(category)) => self
+                            .category_stats
+                            .get(&category)
+                            .map_or(0, |stats| stats.0),
+                        (ViewMode::Cleanup, None) => self.analysis.cleanup_files,
                     })
                 } else if self.has_more_rows {
                     format!("{}+", format_count(self.visible.len() as u64))
@@ -1792,6 +1903,7 @@ impl ScannerApp {
                         name,
                         file.size,
                         file.is_cleanup_candidate(),
+                        file.cleanup.category,
                     )
                 })
             })
@@ -1811,7 +1923,7 @@ impl ScannerApp {
             .show(ctx, |ui| {
                 ui.label(format!("Общий размер: {}", format_bytes(total_size)));
                 ui.add_space(6.0);
-                for (_, _, name, _, _) in entries.iter().take(5) {
+                for (_, _, name, _, _, _) in entries.iter().take(5) {
                     ui.label(format!("• {name}"));
                 }
                 if count > 5 {
@@ -1826,7 +1938,7 @@ impl ScannerApp {
                         let mut deleted_count = 0_usize;
                         let mut failed = 0_usize;
                         let mut freed = 0_u64;
-                        for (index, path, _, size, cleanup_candidate) in &entries {
+                        for (index, path, _, size, cleanup_candidate, category) in &entries {
                             match trash::delete(path) {
                                 Ok(()) => {
                                     if let Some(file) =
@@ -1839,6 +1951,10 @@ impl ScannerApp {
                                             self.analysis.cleanup_files.saturating_sub(1);
                                         self.analysis.cleanup_bytes =
                                             self.analysis.cleanup_bytes.saturating_sub(*size);
+                                        if let Some(stats) = self.category_stats.get_mut(category) {
+                                            stats.0 = stats.0.saturating_sub(1);
+                                            stats.1 = stats.1.saturating_sub(*size);
+                                        }
                                     }
                                     deleted_count += 1;
                                     freed = freed.saturating_add(*size);

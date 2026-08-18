@@ -1,4 +1,4 @@
-use crate::model::{FileEntry, SortMode, SortRule, ViewMode};
+use crate::model::{CleanupCategory, FileEntry, SortMode, SortRule, ViewMode};
 
 pub(crate) fn file_matches(
     file: &FileEntry,
@@ -16,6 +16,13 @@ pub(crate) fn file_matches(
         && (query.is_empty()
             || file.name_lower.contains(query)
             || file.path.to_string_lossy().to_lowercase().contains(query))
+}
+
+pub(crate) fn file_matches_category(file: &FileEntry, category: Option<CleanupCategory>) -> bool {
+    match category {
+        None => true,
+        Some(category) => file.cleanup.category == category && file.is_cleanup_candidate(),
+    }
 }
 
 pub(crate) fn default_sort_descending(mode: SortMode) -> bool {
