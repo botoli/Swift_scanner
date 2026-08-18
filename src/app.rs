@@ -55,7 +55,7 @@ struct ScannerApp {
     started_at: Option<Instant>,
     elapsed: Duration,
     notice: Option<(String, bool, Instant)>,
-    pending_delete: Option<usize>,
+    pending_bulk_delete: Option<Vec<usize>>,
     image_index_receiver: Option<Receiver<ImageIndexMessage>>,
     image_index_cancel: Option<Arc<AtomicBool>>,
     image_engine: Option<Arc<dyn ImageSearchEngine>>,
@@ -111,7 +111,7 @@ impl ScannerApp {
             started_at: None,
             elapsed: Duration::ZERO,
             notice: None,
-            pending_delete: None,
+            pending_bulk_delete: None,
             image_index_receiver: None,
             image_index_cancel: None,
             image_engine: None,
@@ -151,6 +151,7 @@ impl ScannerApp {
         self.scan_preview_cleanup.clear();
         self.selected_rows.clear();
         self.selection_anchor = None;
+        self.pending_bulk_delete = None;
         self.file_index = None;
         self.index_receiver = None;
         self.image_engine = None;
@@ -931,6 +932,37 @@ impl ScannerApp {
         }
     }
 
+    fn row_context_menu(&mut self, ui: &mut egui::Ui, index: usize) {
+        let Some(file) = self.files.get(index) else {
+            return;
+        };
+        let path = file.path.clone();
+        let can_delete = self.file_index.is_some() && !file.deleted;
+
+        if ui.button("Открыть файл").clicked() {
+            self.notice = Some(match open_path(&path) {
+                Ok(()) => ("Файл открыт".to_owned(), false, Instant::now()),
+                Err(error) => (error, true, Instant::now()),
+            });
+            ui.close_menu();
+        }
+        if ui.button("Показать в папке").clicked() {
+            self.notice = Some(match reveal_in_file_manager(&path) {
+                Ok(()) => ("Папка открыта".to_owned(), false, Instant::now()),
+                Err(error) => (error, true, Instant::now()),
+            });
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(can_delete, egui::Button::new("Переместить в корзину"))
+            .on_disabled_hover_text("Доступно после подготовки списка")
+            .clicked()
+        {
+            self.pending_bulk_delete = Some(vec![index]);
+            ui.close_menu();
+        }
+    }
+
     fn central_panel(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
             .frame(
@@ -1032,6 +1064,7 @@ impl ScannerApp {
                 } else {
                     format_count(self.visible.len() as u64)
                 };
+                let can_delete = self.file_index.is_some();
                 egui::Frame::new()
                     .fill(crate::SURFACE)
                     .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
@@ -1055,6 +1088,31 @@ impl ScannerApp {
                                         RichText::new("СТОЛБЦЫ  8/8").size(8.0).color(crate::MUTED),
                                     );
                                     if !self.selected_rows.is_empty() {
+                                        let selected = self
+                                            .selected_rows
+                                            .iter()
+                                            .copied()
+                                            .filter(|index| {
+                                                self.files
+                                                    .get(*index)
+                                                    .is_some_and(|file| !file.deleted)
+                                            })
+                                            .collect::<Vec<_>>();
+                                        if ui
+                                            .add_enabled(
+                                                can_delete && !selected.is_empty(),
+                                                egui::Button::new(format!(
+                                                    "В КОРЗИНУ {}",
+                                                    selected.len()
+                                                )),
+                                            )
+                                            .on_disabled_hover_text(
+                                                "Доступно после подготовки списка",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.pending_bulk_delete = Some(selected);
+                                        }
                                         ui.label(
                                             RichText::new(format!(
                                                 "ВЫДЕЛЕНО  {}",
@@ -1064,6 +1122,14 @@ impl ScannerApp {
                                             .strong()
                                             .color(crate::BLUE),
                                         );
+                                        if ui.small_button("Снять").clicked() {
+                                            self.selected_rows.clear();
+                                            self.selection_anchor = None;
+                                        }
+                                    }
+                                    if ui.small_button("Выбрать все").clicked() {
+                                        self.selected_rows = self.visible.iter().copied().collect();
+                                        self.selection_anchor = None;
                                     }
                                     ui.label(
                                         RichText::new("Клик: сортировка / повторный клик: порядок")
@@ -1081,7 +1147,6 @@ impl ScannerApp {
                     .take(self.loaded_rows)
                     .copied()
                     .collect::<Vec<_>>();
-                let can_delete = self.file_index.is_some();
                 let table_width = ui.available_width();
                 let fixed_width = 560.0;
                 let flexible_width = (table_width - fixed_width).max(168.0);
@@ -1202,52 +1267,7 @@ impl ScannerApp {
                                             egui::Layout::left_to_right(egui::Align::Center),
                                             |ui| {
                                                 ui.menu_button("•••", |ui| {
-                                                    if ui.button("Открыть файл").clicked()
-                                                    {
-                                                        self.notice =
-                                                            Some(match open_path(&path) {
-                                                                Ok(()) => (
-                                                                    "Файл открыт".to_owned(),
-                                                                    false,
-                                                                    Instant::now(),
-                                                                ),
-                                                                Err(error) => {
-                                                                    (error, true, Instant::now())
-                                                                }
-                                                            });
-                                                        ui.close_menu();
-                                                    }
-                                                    if ui.button("Показать в папке").clicked()
-                                                    {
-                                                        self.notice = Some(
-                                                            match reveal_in_file_manager(&path) {
-                                                                Ok(()) => (
-                                                                    "Папка открыта".to_owned(),
-                                                                    false,
-                                                                    Instant::now(),
-                                                                ),
-                                                                Err(error) => {
-                                                                    (error, true, Instant::now())
-                                                                }
-                                                            },
-                                                        );
-                                                        ui.close_menu();
-                                                    }
-                                                    if ui
-                                                        .add_enabled(
-                                                            can_delete,
-                                                            egui::Button::new(
-                                                                "Переместить в корзину",
-                                                            ),
-                                                        )
-                                                        .on_disabled_hover_text(
-                                                            "Доступно после подготовки списка",
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        self.pending_delete = Some(index);
-                                                        ui.close_menu();
-                                                    }
+                                                    self.row_context_menu(ui, index);
                                                 });
                                             },
                                         );
@@ -1752,62 +1772,95 @@ impl ScannerApp {
     }
 
     fn delete_confirmation(&mut self, ctx: &egui::Context) {
-        let Some(index) = self.pending_delete else {
+        let Some(indices) = self.pending_bulk_delete.clone() else {
             return;
         };
-        let Some(file) = self.files.get(index) else {
-            self.pending_delete = None;
+        let entries = indices
+            .into_iter()
+            .filter_map(|index| {
+                let file = self.files.get(index)?;
+                (!file.deleted).then(|| {
+                    let name = file
+                        .path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("файл")
+                        .to_owned();
+                    (
+                        index,
+                        file.path.clone(),
+                        name,
+                        file.size,
+                        file.is_cleanup_candidate(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            self.pending_bulk_delete = None;
             return;
-        };
-        let path = file.path.clone();
-        let cleanup_size = file.is_cleanup_candidate().then_some(file.size);
-        let name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("файл")
-            .to_owned();
-        egui::Window::new("Переместить в корзину?")
+        }
+        let total_size = entries
+            .iter()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.3));
+        let count = entries.len();
+        egui::Window::new(format!("Переместить {count} файлов в корзину?"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(format!("{name}\n{}", short_path(&path)));
+                ui.label(format!("Общий размер: {}", format_bytes(total_size)));
+                ui.add_space(6.0);
+                for (_, _, name, _, _) in entries.iter().take(5) {
+                    ui.label(format!("• {name}"));
+                }
+                if count > 5 {
+                    ui.label(format!("…и ещё {}", count - 5));
+                }
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Отмена").clicked() {
-                        self.pending_delete = None;
+                        self.pending_bulk_delete = None;
                     }
                     if ui.button("В корзину").clicked() {
-                        match trash::delete(&path) {
-                            Ok(()) => {
-                                if let Some(file) = Arc::make_mut(&mut self.files).get_mut(index) {
-                                    file.deleted = true;
+                        let mut deleted_count = 0_usize;
+                        let mut failed = 0_usize;
+                        let mut freed = 0_u64;
+                        for (index, path, _, size, cleanup_candidate) in &entries {
+                            match trash::delete(path) {
+                                Ok(()) => {
+                                    if let Some(file) =
+                                        Arc::make_mut(&mut self.files).get_mut(*index)
+                                    {
+                                        file.deleted = true;
+                                    }
+                                    if *cleanup_candidate {
+                                        self.analysis.cleanup_files =
+                                            self.analysis.cleanup_files.saturating_sub(1);
+                                        self.analysis.cleanup_bytes =
+                                            self.analysis.cleanup_bytes.saturating_sub(*size);
+                                    }
+                                    deleted_count += 1;
+                                    freed = freed.saturating_add(*size);
                                 }
-                                if let Some(size) = cleanup_size {
-                                    self.analysis.cleanup_files =
-                                        self.analysis.cleanup_files.saturating_sub(1);
-                                    self.analysis.cleanup_bytes =
-                                        self.analysis.cleanup_bytes.saturating_sub(size);
-                                }
-                                self.selected_rows.remove(&index);
-                                if self.selection_anchor == Some(index) {
-                                    self.selection_anchor = None;
-                                }
-                                self.notice = Some((
-                                    "Файл перемещён в корзину".to_owned(),
-                                    false,
-                                    Instant::now(),
-                                ));
-                                self.refresh_visible();
-                            }
-                            Err(error) => {
-                                self.notice = Some((
-                                    format!("Не удалось удалить файл: {error}"),
-                                    true,
-                                    Instant::now(),
-                                ));
+                                Err(_) => failed += 1,
                             }
                         }
-                        self.pending_delete = None;
+                        self.selected_rows.clear();
+                        self.selection_anchor = None;
+                        let message = if failed > 0 {
+                            format!("Перемещено {deleted_count}, не удалось: {failed}")
+                        } else if deleted_count == 1 {
+                            format!("Файл перемещён в корзину ({})", format_bytes(freed))
+                        } else {
+                            format!(
+                                "Файлов перемещено в корзину: {deleted_count} ({})",
+                                format_bytes(freed)
+                            )
+                        };
+                        self.notice = Some((message, failed > 0, Instant::now()));
+                        self.pending_bulk_delete = None;
+                        self.refresh_visible();
                     }
                 });
             });
