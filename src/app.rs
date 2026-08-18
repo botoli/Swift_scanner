@@ -365,7 +365,7 @@ impl ScannerApp {
             Ok(index) => {
                 self.file_index = Some(index);
                 self.refresh_visible();
-                self.start_image_indexing();
+                self.image_accelerator = "Индекс фото не запущен".to_owned();
             }
             Err(mpsc::TryRecvError::Empty) => self.index_receiver = Some(receiver),
             Err(mpsc::TryRecvError::Disconnected) => {}
@@ -830,6 +830,22 @@ impl ScannerApp {
                         }
                         ui.add_space(6.0);
                         self.image_search_tab(ui);
+                        if self.image_engine.is_none() && !self.image_indexing {
+                            let can_index_images = self.file_index.is_some();
+                            if ui
+                                .add_enabled(
+                                    can_index_images,
+                                    egui::Button::new(
+                                        RichText::new("ИНДЕКСИРОВАТЬ ФОТО").size(9.0).strong(),
+                                    )
+                                    .min_size(egui::vec2(ui.available_width(), 30.0)),
+                                )
+                                .on_disabled_hover_text("Сначала завершите сканирование файлов")
+                                .clicked()
+                            {
+                                self.start_image_indexing();
+                            }
+                        }
 
                         ui.add_space(14.0);
                         ui.label(
@@ -1830,7 +1846,7 @@ impl ScannerApp {
                     self.image_empty_state(
                         ui,
                         "СНАЧАЛА СОЗДАЙТЕ ИНДЕКС",
-                        "Выберите папку и запустите сканирование. После обычного индекса SwiftScan подготовит визуальный кэш.",
+                        "Завершите сканирование, затем нажмите «Индексировать фото» в боковой панели.",
                     );
                 } else if self.image_query_path.is_none() {
                     self.image_empty_state(
