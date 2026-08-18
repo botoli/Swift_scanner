@@ -13,9 +13,13 @@ pub(crate) fn file_matches(
             ViewMode::All => true,
             ViewMode::Cleanup => file.is_cleanup_candidate(),
         }
-        && (query.is_empty()
-            || file.name_lower.contains(query)
-            || file.path.to_string_lossy().to_lowercase().contains(query))
+        && if query.is_empty() {
+            true
+        } else if query.starts_with('.') {
+            file.name_lower.ends_with(query)
+        } else {
+            file.name_lower.contains(query) || file.path_lower.contains(query)
+        }
 }
 
 pub(crate) fn file_matches_category(file: &FileEntry, category: Option<CleanupCategory>) -> bool {

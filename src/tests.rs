@@ -28,6 +28,26 @@ fn file_filter_combines_query_and_size_bounds() {
 }
 
 #[test]
+fn dot_query_matches_file_extension_not_directory_name() {
+    let image_in_dotted_directory =
+        FileEntry::new(PathBuf::from(r"C:\Images\.iso\photo.jpg"), 1024, None);
+    let disk_image = FileEntry::new(PathBuf::from(r"C:\Images\archive.ISO"), 1024, None);
+
+    assert!(!file_matches(
+        &image_in_dotted_directory,
+        ".iso",
+        (0, u64::MAX),
+        ViewMode::All,
+    ));
+    assert!(file_matches(
+        &disk_image,
+        ".iso",
+        (0, u64::MAX),
+        ViewMode::All,
+    ));
+}
+
+#[test]
 fn cleanup_rating_protects_system_files_and_prioritizes_cache() {
     let protected = FileEntry::new(PathBuf::from(r"C:\Windows\System32\driver.sys"), 10, None);
     let cache = FileEntry::new(
