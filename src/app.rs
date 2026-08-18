@@ -60,6 +60,7 @@ struct ScannerApp {
     elapsed: Duration,
     notice: Option<(String, bool, Instant)>,
     pending_bulk_delete: Option<Vec<usize>>,
+    search_focus: bool,
     image_index_receiver: Option<Receiver<ImageIndexMessage>>,
     image_index_cancel: Option<Arc<AtomicBool>>,
     image_engine: Option<Arc<dyn ImageSearchEngine>>,
@@ -118,6 +119,7 @@ impl ScannerApp {
             elapsed: Duration::ZERO,
             notice: None,
             pending_bulk_delete: None,
+            search_focus: false,
             image_index_receiver: None,
             image_index_cancel: None,
             image_engine: None,
@@ -158,6 +160,7 @@ impl ScannerApp {
         self.selected_rows.clear();
         self.selection_anchor = None;
         self.pending_bulk_delete = None;
+        self.search_focus = false;
         self.category_filter = None;
         self.category_stats.clear();
         self.file_index = None;
@@ -1070,6 +1073,48 @@ impl ScannerApp {
         }
     }
 
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let (select_all, delete, escape, focus_search) = ctx.input(|input| {
+            (
+                input.modifiers.command && input.key_pressed(egui::Key::A),
+                input.key_pressed(egui::Key::Delete),
+                input.key_pressed(egui::Key::Escape),
+                input.modifiers.command && input.key_pressed(egui::Key::F),
+            )
+        });
+
+        if select_all {
+            self.selected_rows = self.visible.iter().copied().collect();
+            self.selection_anchor = None;
+        }
+        if delete && self.file_index.is_some() {
+            let selected = self
+                .selected_rows
+                .iter()
+                .copied()
+                .filter(|index| self.files.get(*index).is_some_and(|file| !file.deleted))
+                .collect::<Vec<_>>();
+            if !selected.is_empty() {
+                self.pending_bulk_delete = Some(selected);
+            }
+        }
+        if escape {
+            self.query.clear();
+            self.min_mb.clear();
+            self.max_mb.clear();
+            self.category_filter = None;
+            self.selected_rows.clear();
+            self.selection_anchor = None;
+            self.refresh_visible();
+        }
+        if focus_search {
+            self.search_focus = true;
+        }
+    }
+
     fn central_panel(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
             .frame(
@@ -1093,14 +1138,16 @@ impl ScannerApp {
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let changed = ui
-                            .add_sized(
-                                [240.0, 30.0],
-                                egui::TextEdit::singleline(&mut self.query)
-                                    .hint_text("Поиск по имени или пути…"),
-                            )
-                            .changed();
-                        if changed {
+                        let response = ui.add_sized(
+                            [240.0, 30.0],
+                            egui::TextEdit::singleline(&mut self.query)
+                                .hint_text("Поиск по имени или пути…"),
+                        );
+                        if self.search_focus {
+                            response.request_focus();
+                            self.search_focus = false;
+                        }
+                        if response.changed() {
                             self.refresh_visible();
                         }
                     });
@@ -1286,6 +1333,7 @@ impl ScannerApp {
                             let selected = self.selected_rows.contains(&index);
                             let file = &self.files[index];
                             let path = file.path.clone();
+                            let full_path = path.to_string_lossy().into_owned();
                             let name = path
                                 .file_name()
                                 .and_then(|value| value.to_str())
@@ -1336,7 +1384,8 @@ impl ScannerApp {
                                                 RichText::new(name).size(10.0).color(crate::INK),
                                             )
                                             .truncate(),
-                                        );
+                                        )
+                                        .on_hover_text(&full_path);
                                         ui.add_sized(
                                             [path_width, 24.0],
                                             egui::Label::new(
@@ -1346,7 +1395,8 @@ impl ScannerApp {
                                                     .color(crate::MUTED),
                                             )
                                             .truncate(),
-                                        );
+                                        )
+                                        .on_hover_text(&full_path);
                                         ui.add_sized(
                                             [78.0, 24.0],
                                             egui::Label::new(
@@ -1398,6 +1448,9 @@ impl ScannerApp {
                                 ui.id().with(("file-row", index)),
                                 egui::Sense::click(),
                             );
+                            selection_response.context_menu(|ui| {
+                                self.row_context_menu(ui, index);
+                            });
                             let hovered = ui.input(|input| {
                                 input
                                     .pointer
@@ -1414,6 +1467,12 @@ impl ScannerApp {
                             if selection_response.clicked() {
                                 let extend = ui.input(|input| input.modifiers.shift);
                                 self.select_row(index, extend);
+                            }
+                            if selection_response.double_clicked() {
+                                self.notice = Some(match open_path(&path) {
+                                    Ok(()) => ("Файл открыт".to_owned(), false, Instant::now()),
+                                    Err(error) => (error, true, Instant::now()),
+                                });
                             }
                         }
                     });
@@ -1985,6 +2044,7 @@ impl ScannerApp {
 
 impl eframe::App for ScannerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_keyboard_shortcuts(ctx);
         self.handle_dropped_reference(ctx);
         self.poll_scan();
         self.poll_index();
