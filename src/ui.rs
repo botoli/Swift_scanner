@@ -44,6 +44,21 @@ pub(crate) fn format_modified(modified: Option<SystemTime>) -> String {
         .unwrap_or_else(|| "—".to_owned())
 }
 
+pub(crate) fn format_file_age(modified: Option<SystemTime>) -> String {
+    let Some(age) = modified.and_then(|time| SystemTime::now().duration_since(time).ok()) else {
+        return "возраст неизвестен".to_owned();
+    };
+    let days = age.as_secs() / 86_400;
+    match days {
+        0 => "сегодня".to_owned(),
+        1 => "1 день назад".to_owned(),
+        2..=4 => format!("{days} дня назад"),
+        5..=30 => format!("{days} дней назад"),
+        31..=364 => format!("{} мес. назад", days / 30),
+        _ => format!("{} г. назад", days / 365),
+    }
+}
+
 pub(crate) fn parse_megabytes(value: &str) -> Option<u64> {
     let megabytes: f64 = value.trim().replace(',', ".").parse().ok()?;
     (megabytes.is_finite() && megabytes >= 0.0).then_some((megabytes * 1024.0 * 1024.0) as u64)

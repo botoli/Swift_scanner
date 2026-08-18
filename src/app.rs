@@ -6,7 +6,6 @@ use crate::index::FileIndex;
 use crate::model::*;
 use crate::scanner::{scan_directory, scan_engine_label, scan_target_capacity};
 use crate::ui::*;
-use crate::visual_index::{build_image_index, is_supported_image, run_image_search};
 use eframe::egui::{self, Color32, RichText, ScrollArea};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -74,7 +73,7 @@ pub(crate) fn run() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1360.0, 780.0])
-            .with_min_inner_size([1040.0, 640.0]),
+            .with_min_inner_size([920.0, 620.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -115,22 +114,6 @@ struct ScannerApp {
     notice: Option<(String, bool, Instant)>,
     pending_bulk_delete: Option<Vec<usize>>,
     search_focus: bool,
-    image_index_receiver: Option<Receiver<ImageIndexMessage>>,
-    image_index_cancel: Option<Arc<AtomicBool>>,
-    image_engine: Option<Arc<dyn ImageSearchEngine>>,
-    image_indexing: bool,
-    image_index_started: Option<Instant>,
-    image_index_stats: ImageIndexStats,
-    image_accelerator: String,
-    image_search_receiver: Option<Receiver<ImageSearchMessage>>,
-    image_search_cancel: Option<Arc<AtomicBool>>,
-    image_searching: bool,
-    image_query_path: Option<PathBuf>,
-    image_search_mode: ImageSearchMode,
-    image_hits: Vec<ImageSearchHit>,
-    image_query_texture: Option<egui::TextureHandle>,
-    image_result_textures: HashMap<usize, egui::TextureHandle>,
-    image_search_open: bool,
     games: MiniGames,
     games_open: bool,
 }
@@ -174,22 +157,6 @@ impl ScannerApp {
             notice: None,
             pending_bulk_delete: None,
             search_focus: false,
-            image_index_receiver: None,
-            image_index_cancel: None,
-            image_engine: None,
-            image_indexing: false,
-            image_index_started: None,
-            image_index_stats: ImageIndexStats::default(),
-            image_accelerator: "Ожидание сканирования".to_owned(),
-            image_search_receiver: None,
-            image_search_cancel: None,
-            image_searching: false,
-            image_query_path: None,
-            image_search_mode: ImageSearchMode::Semantic,
-            image_hits: Vec::new(),
-            image_query_texture: None,
-            image_result_textures: HashMap::new(),
-            image_search_open: false,
             games: MiniGames::new(),
             games_open: false,
         }
@@ -228,15 +195,6 @@ impl ScannerApp {
         self.category_stats.clear();
         self.file_index = None;
         self.index_receiver = None;
-        self.image_engine = None;
-        self.image_index_receiver = None;
-        self.image_indexing = false;
-        self.image_index_started = None;
-        self.image_index_stats = ImageIndexStats::default();
-        self.image_accelerator = "Ожидание индекса файлов".to_owned();
-        self.image_hits.clear();
-        self.image_query_texture = None;
-        self.image_result_textures.clear();
         self.stats = ScanStats::default();
         self.analysis = AnalysisStats::default();
         self.loaded_rows = crate::PAGE_SIZE;
@@ -259,15 +217,7 @@ impl ScannerApp {
         if let Some(cancel) = &self.scan_cancel {
             cancel.store(true, Ordering::Relaxed);
         }
-        if let Some(cancel) = &self.image_index_cancel {
-            cancel.store(true, Ordering::Relaxed);
-        }
-        if let Some(cancel) = &self.image_search_cancel {
-            cancel.store(true, Ordering::Relaxed);
-        }
         self.scanning = false;
-        self.image_indexing = false;
-        self.image_searching = false;
     }
 
     fn poll_scan(&mut self) {
@@ -365,203 +315,10 @@ impl ScannerApp {
             Ok(index) => {
                 self.file_index = Some(index);
                 self.refresh_visible();
-                self.image_accelerator = "Индекс фото не запущен".to_owned();
             }
             Err(mpsc::TryRecvError::Empty) => self.index_receiver = Some(receiver),
             Err(mpsc::TryRecvError::Disconnected) => {}
         }
-    }
-
-    /// Starts the incremental visual index after the regular file index is ready.
-    ///
-    /// It receives the existing scan result and root path, and returns progress
-    /// plus a shared search engine through `ImageIndexMessage`. No filesystem
-    /// traversal or image decoding occurs on the UI thread.
-    fn start_image_indexing(&mut self) {
-        if let Some(cancel) = &self.image_index_cancel {
-            cancel.store(true, Ordering::Relaxed);
-        }
-        let files = Arc::clone(&self.files);
-        let root = self.root.clone();
-        let (sender, receiver) = mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = Arc::clone(&cancelled);
-        thread::spawn(move || build_image_index(files, root, sender, worker_cancelled));
-        self.image_index_receiver = Some(receiver);
-        self.image_index_cancel = Some(cancelled);
-        self.image_indexing = true;
-        self.image_index_started = Some(Instant::now());
-        self.image_engine = None;
-        self.image_index_stats = ImageIndexStats::default();
-        self.image_accelerator = "Загрузка MobileCLIP2-S0".to_owned();
-    }
-
-    fn poll_image_index(&mut self) {
-        let Some(receiver) = self.image_index_receiver.take() else {
-            return;
-        };
-        let mut keep_receiver = true;
-        while let Ok(message) = receiver.try_recv() {
-            match message {
-                ImageIndexMessage::Progress(stats, accelerator) => {
-                    self.image_index_stats = stats;
-                    self.image_accelerator = accelerator;
-                }
-                ImageIndexMessage::Ready(engine, stats) => {
-                    self.image_index_stats = stats;
-                    self.image_accelerator = engine.accelerator();
-                    self.image_engine = Some(engine);
-                    self.image_indexing = false;
-                    self.image_index_started = None;
-                    self.image_index_cancel = None;
-                    keep_receiver = false;
-                    if self.image_query_path.is_some() {
-                        self.start_image_search();
-                    }
-                }
-                ImageIndexMessage::Failed(error) => {
-                    self.image_indexing = false;
-                    self.image_index_started = None;
-                    self.image_index_cancel = None;
-                    self.image_accelerator = "Индекс недоступен".to_owned();
-                    self.notice = Some((error, true, Instant::now()));
-                    keep_receiver = false;
-                }
-                ImageIndexMessage::Cancelled => {
-                    self.image_indexing = false;
-                    self.image_index_started = None;
-                    self.image_index_cancel = None;
-                    keep_receiver = false;
-                }
-            }
-        }
-        if keep_receiver {
-            self.image_index_receiver = Some(receiver);
-        }
-    }
-
-    fn choose_reference_image(&mut self) {
-        let mut dialog =
-            rfd::FileDialog::new().add_filter("Изображения", &["jpg", "jpeg", "png", "webp"]);
-        if self.root.is_dir() {
-            dialog = dialog.set_directory(&self.root);
-        }
-        if let Some(path) = dialog.pick_file() {
-            self.image_query_path = Some(path);
-            self.start_image_search();
-        }
-    }
-
-    /// Accepts an image dropped onto the visual-search screen.
-    ///
-    /// `eframe::App::update` calls this once per frame with the egui context.
-    /// It reads only already-delivered drop metadata, stores a supported local
-    /// path, and starts the same asynchronous query used by the file dialog.
-    fn handle_dropped_reference(&mut self, ctx: &egui::Context) {
-        if !self.image_search_open {
-            return;
-        }
-        let dropped_path = ctx.input(|input| {
-            input
-                .raw
-                .dropped_files
-                .iter()
-                .rev()
-                .filter_map(|file| file.path.clone())
-                .find(|path| is_supported_image(path))
-        });
-        if let Some(path) = dropped_path {
-            self.image_query_path = Some(path);
-            self.start_image_search();
-        }
-    }
-
-    /// Starts a ranked image query and lazy thumbnail stream.
-    ///
-    /// It is called after choosing a reference image, changing the search mode,
-    /// or completing a new visual index. It takes no arguments because the
-    /// current query state belongs to `ScannerApp`; results arrive asynchronously.
-    fn start_image_search(&mut self) {
-        if let Some(cancel) = &self.image_search_cancel {
-            cancel.store(true, Ordering::Relaxed);
-        }
-        self.image_search_receiver = None;
-        self.image_search_cancel = None;
-        self.image_searching = false;
-        self.image_hits.clear();
-        self.image_query_texture = None;
-        self.image_result_textures.clear();
-
-        let (Some(engine), Some(path)) = (&self.image_engine, &self.image_query_path) else {
-            return;
-        };
-        let request = ImageSearchRequest {
-            path: path.clone(),
-            mode: self.image_search_mode,
-            limit: 100,
-        };
-        let engine = Arc::clone(engine);
-        let files = Arc::clone(&self.files);
-        let (sender, receiver) = mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = Arc::clone(&cancelled);
-        thread::spawn(move || run_image_search(engine, files, request, sender, worker_cancelled));
-        self.image_search_receiver = Some(receiver);
-        self.image_search_cancel = Some(cancelled);
-        self.image_searching = true;
-    }
-
-    fn poll_image_search(&mut self, ctx: &egui::Context) {
-        let Some(receiver) = self.image_search_receiver.take() else {
-            return;
-        };
-        let mut keep_receiver = true;
-        while let Ok(message) = receiver.try_recv() {
-            match message {
-                ImageSearchMessage::Results(hits, preview) => {
-                    self.image_hits = hits;
-                    if let Some(engine) = &self.image_engine {
-                        self.image_accelerator = engine.accelerator();
-                    }
-                    if let Some(preview) = preview {
-                        self.image_query_texture =
-                            Some(Self::make_texture(ctx, "visual-query", preview));
-                    }
-                }
-                ImageSearchMessage::Thumbnail(file_index, image) => {
-                    let texture =
-                        Self::make_texture(ctx, &format!("visual-result-{file_index}"), image);
-                    self.image_result_textures.insert(file_index, texture);
-                }
-                ImageSearchMessage::Finished => {
-                    self.image_searching = false;
-                    self.image_search_cancel = None;
-                    keep_receiver = false;
-                }
-                ImageSearchMessage::Failed(error) => {
-                    self.image_searching = false;
-                    self.image_search_cancel = None;
-                    self.notice = Some((error, true, Instant::now()));
-                    keep_receiver = false;
-                }
-                ImageSearchMessage::Cancelled => {
-                    self.image_searching = false;
-                    self.image_search_cancel = None;
-                    keep_receiver = false;
-                }
-            }
-        }
-        if keep_receiver {
-            self.image_search_receiver = Some(receiver);
-        }
-    }
-
-    fn make_texture(ctx: &egui::Context, name: &str, image: PixelImage) -> egui::TextureHandle {
-        ctx.load_texture(
-            name,
-            egui::ColorImage::from_rgba_unmultiplied([image.width, image.height], &image.rgba),
-            egui::TextureOptions::LINEAR,
-        )
     }
 
     fn size_bounds(&self) -> (u64, u64) {
@@ -644,8 +401,14 @@ impl ScannerApp {
     }
 
     fn sidebar(&mut self, ctx: &egui::Context) {
+        let viewport_width = ctx.screen_rect().width();
+        let sidebar_width = if viewport_width < 1120.0 {
+            220.0
+        } else {
+            276.0
+        };
         egui::SidePanel::left("sidebar")
-            .exact_width(252.0)
+            .exact_width(sidebar_width)
             .frame(
                 egui::Frame::new()
                     .fill(Color32::from_rgb(13, 19, 27))
@@ -653,15 +416,14 @@ impl ScannerApp {
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ctx, |ui| {
-                let content_height = (ui.available_height() - 58.0).max(80.0);
                 ScrollArea::vertical()
                     .id_salt("sidebar-content")
                     .auto_shrink([false, false])
-                    .max_height(content_height)
+                    .max_height(ui.available_height())
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("SPACE/INDEX")
+                                RichText::new("SWIFTSCAN")
                                     .size(10.0)
                                     .strong()
                                     .color(crate::BLUE),
@@ -669,13 +431,11 @@ impl ScannerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.label(
-                                        RichText::new("LOCAL 0.3").size(9.0).color(crate::MUTED),
-                                    );
+                                    ui.label(RichText::new("LOCAL").size(9.0).color(crate::MUTED));
                                 },
                             );
                         });
-                        ui.add_space(22.0);
+                        ui.add_space(16.0);
                         ui.label(
                             RichText::new("ОЧИСТКА ДИСКА")
                                 .size(21.0)
@@ -690,7 +450,7 @@ impl ScannerApp {
                             .size(12.0)
                             .color(crate::MUTED),
                         );
-                        ui.add_space(22.0);
+                        ui.add_space(18.0);
                         ui.separator();
                         ui.add_space(16.0);
                         ui.label(
@@ -705,7 +465,6 @@ impl ScannerApp {
                             .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
                             .inner_margin(egui::Margin::same(12))
                             .show(ui, |ui| {
-                                ui.set_min_width(194.0);
                                 ui.label(
                                     RichText::new(short_path(&self.root))
                                         .size(11.0)
@@ -717,6 +476,29 @@ impl ScannerApp {
                                     .clicked()
                                 {
                                     self.choose_folder();
+                                }
+                                ui.add_space(8.0);
+                                let scan_label = if self.scanning {
+                                    "ОСТАНОВИТЬ"
+                                } else if self.stats.files > 0 {
+                                    "СКАНИРОВАТЬ СНОВА"
+                                } else {
+                                    "СКАНИРОВАТЬ"
+                                };
+                                let scan_button = egui::Button::new(
+                                    RichText::new(scan_label)
+                                        .size(11.0)
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(crate::BLUE)
+                                .min_size(egui::vec2(ui.available_width(), 38.0));
+                                if ui.add(scan_button).clicked() {
+                                    if self.scanning {
+                                        self.cancel_jobs();
+                                    } else {
+                                        self.start_scan();
+                                    }
                                 }
                             });
                         ui.add_space(6.0);
@@ -780,16 +562,17 @@ impl ScannerApp {
                         );
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
+                            let field_width = ((ui.available_width() - 22.0) / 2.0).max(62.0);
                             let min_changed = ui
                                 .add_sized(
-                                    [93.0, 29.0],
+                                    [field_width, 29.0],
                                     egui::TextEdit::singleline(&mut self.min_mb).hint_text("От"),
                                 )
                                 .changed();
                             ui.label(RichText::new("—").color(crate::MUTED));
                             let max_changed = ui
                                 .add_sized(
-                                    [93.0, 29.0],
+                                    [field_width, 29.0],
                                     egui::TextEdit::singleline(&mut self.max_mb).hint_text("До"),
                                 )
                                 .changed();
@@ -822,29 +605,8 @@ impl ScannerApp {
                                 format_bytes(self.analysis.cleanup_bytes)
                             ),
                         );
-                        if self.view == ViewMode::Cleanup
-                            && !self.games_open
-                            && !self.image_search_open
-                        {
+                        if self.view == ViewMode::Cleanup && !self.games_open {
                             self.category_chips(ui);
-                        }
-                        ui.add_space(6.0);
-                        self.image_search_tab(ui);
-                        if self.image_engine.is_none() && !self.image_indexing {
-                            let can_index_images = self.file_index.is_some();
-                            if ui
-                                .add_enabled(
-                                    can_index_images,
-                                    egui::Button::new(
-                                        RichText::new("ИНДЕКСИРОВАТЬ ФОТО").size(9.0).strong(),
-                                    )
-                                    .min_size(egui::vec2(ui.available_width(), 30.0)),
-                                )
-                                .on_disabled_hover_text("Сначала завершите сканирование файлов")
-                                .clicked()
-                            {
-                                self.start_image_indexing();
-                            }
                         }
 
                         ui.add_space(14.0);
@@ -855,55 +617,45 @@ impl ScannerApp {
                                 .color(crate::MUTED),
                         );
                         ui.add_space(5.0);
-                        let games_button = egui::Button::new(
-                            RichText::new("МИНИ-ИГРЫ  /  12").size(11.0).strong().color(
-                                if self.games_open {
-                                    Color32::WHITE
-                                } else {
-                                    crate::INK
-                                },
-                            ),
-                        )
-                        .fill(if self.games_open {
-                            Color32::from_rgb(27, 49, 76)
-                        } else {
-                            crate::SURFACE
-                        })
-                        .stroke(egui::Stroke::new(
-                            1.0_f32,
-                            if self.games_open {
-                                crate::BLUE
-                            } else {
-                                crate::LINE
-                            },
-                        ))
-                        .min_size(egui::Vec2::new(ui.available_width(), 38.0));
-                        if ui.add(games_button).clicked() {
+                        let mut requested_game = None;
+                        ui.columns(3, |columns| {
+                            if columns[0]
+                                .add_sized(
+                                    [columns[0].available_width(), 48.0],
+                                    egui::Button::new("Крестики\nнолики"),
+                                )
+                                .clicked()
+                            {
+                                requested_game = Some(0);
+                            }
+                            if columns[1]
+                                .add_sized(
+                                    [columns[1].available_width(), 48.0],
+                                    egui::Button::new("Змейка"),
+                                )
+                                .clicked()
+                            {
+                                requested_game = Some(1);
+                            }
+                            if columns[2]
+                                .add_sized(
+                                    [columns[2].available_width(), 48.0],
+                                    egui::Button::new("Дино"),
+                                )
+                                .clicked()
+                            {
+                                requested_game = Some(2);
+                            }
+                        });
+                        if let Some(game) = requested_game {
                             self.games_open = true;
-                            self.image_search_open = false;
+                            match game {
+                                0 => self.games.open_tic_tac_toe(),
+                                1 => self.games.open_snake(),
+                                _ => self.games.open_dinosaur(),
+                            }
                         }
                     });
-                ui.add_space(8.0);
-                let label = if self.scanning {
-                    "Остановить сканирование"
-                } else {
-                    "Сканировать папку"
-                };
-                let button = egui::Button::new(
-                    RichText::new(label)
-                        .size(13.0)
-                        .strong()
-                        .color(Color32::WHITE),
-                )
-                .fill(crate::BLUE)
-                .min_size(egui::Vec2::new(ui.available_width(), 50.0));
-                if ui.add(button).clicked() {
-                    if self.scanning {
-                        self.cancel_jobs();
-                    } else {
-                        self.start_scan();
-                    }
-                }
             });
     }
 
@@ -929,7 +681,7 @@ impl ScannerApp {
             .inner_margin(egui::Margin::symmetric(12, 10));
         let response = frame
             .show(ui, |ui| {
-                ui.set_min_width(192.0);
+                ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
                     let (bar_rect, _) =
                         ui.allocate_exact_size(egui::Vec2::new(3.0, 32.0), egui::Sense::hover());
@@ -956,7 +708,6 @@ impl ScannerApp {
                 self.category_filter = None;
             }
             self.games_open = false;
-            self.image_search_open = false;
             self.refresh_visible();
         }
     }
@@ -1001,6 +752,7 @@ impl ScannerApp {
             .num_columns(2)
             .spacing([4.0, 4.0])
             .show(ui, |ui| {
+                let chip_width = ((ui.available_width() - 4.0) / 2.0).max(78.0);
                 for (position, (category, (count, bytes))) in categories.iter().enumerate() {
                     let selected = self.category_filter == Some(*category);
                     let text = format!(
@@ -1015,7 +767,7 @@ impl ScannerApp {
                         } else {
                             crate::SURFACE
                         });
-                    if ui.add_sized([95.0, 42.0], button).clicked() && !selected {
+                    if ui.add_sized([chip_width, 44.0], button).clicked() && !selected {
                         self.category_filter = Some(*category);
                         self.view = ViewMode::Cleanup;
                         self.refresh_visible();
@@ -1025,79 +777,6 @@ impl ScannerApp {
                     }
                 }
             });
-    }
-
-    fn image_search_tab(&mut self, ui: &mut egui::Ui) {
-        let selected = self.image_search_open && !self.games_open;
-        let indexed = self.image_engine.as_ref().map_or(
-            self.image_index_stats.cached + self.image_index_stats.processed,
-            |engine| engine.image_count() as u64,
-        );
-        let secondary = if self.image_indexing {
-            format!(
-                "индексация {} / {}",
-                format_count(
-                    self.image_index_stats.processed
-                        + self.image_index_stats.cached
-                        + self.image_index_stats.failed
-                ),
-                format_count(self.image_index_stats.total)
-            )
-        } else {
-            format!("{} изображений", format_count(indexed))
-        };
-        let frame = egui::Frame::new()
-            .fill(if selected {
-                Color32::from_rgb(27, 49, 76)
-            } else {
-                crate::SURFACE
-            })
-            .stroke(egui::Stroke::new(
-                1.0_f32,
-                if selected { crate::BLUE } else { crate::LINE },
-            ))
-            .inner_margin(egui::Margin::symmetric(12, 10));
-        let response = frame
-            .show(ui, |ui| {
-                ui.set_min_width(192.0);
-                ui.horizontal(|ui| {
-                    let (lens_rect, _) =
-                        ui.allocate_exact_size(egui::Vec2::new(30.0, 30.0), egui::Sense::hover());
-                    let painter = ui.painter();
-                    painter.circle_stroke(
-                        lens_rect.center() - egui::vec2(2.0, 2.0),
-                        8.0,
-                        egui::Stroke::new(
-                            1.5_f32,
-                            if selected { crate::BLUE } else { crate::MUTED },
-                        ),
-                    );
-                    painter.line_segment(
-                        [
-                            lens_rect.center() + egui::vec2(4.0, 4.0),
-                            lens_rect.center() + egui::vec2(10.0, 10.0),
-                        ],
-                        egui::Stroke::new(
-                            1.5_f32,
-                            if selected { crate::BLUE } else { crate::MUTED },
-                        ),
-                    );
-                    ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new("Похожие фото")
-                                .size(12.0)
-                                .strong()
-                                .color(if selected { crate::INK } else { crate::MUTED }),
-                        );
-                        ui.label(RichText::new(secondary).size(10.0).color(crate::MUTED));
-                    });
-                });
-            })
-            .response;
-        if response.interact(egui::Sense::click()).clicked() {
-            self.image_search_open = true;
-            self.games_open = false;
-        }
     }
 
     fn header_cell(&mut self, ui: &mut egui::Ui, label: &str, width: f32, sort: Option<SortMode>) {
@@ -1217,21 +896,27 @@ impl ScannerApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("FILE INDEX").size(17.0).color(crate::INK));
+                        ui.label(
+                            RichText::new(self.view.label().to_uppercase())
+                                .size(20.0)
+                                .strong()
+                                .color(crate::INK),
+                        );
                         let status = if self.scanning {
-                            "СКАНИРОВАНИЕ"
+                            "Сканирование файлов"
                         } else {
-                            "ГОТОВО"
+                            "Сканирование завершено"
                         };
                         ui.label(
                             RichText::new(format!("{status} · {}", scan_engine_label()))
-                                .size(8.0)
+                                .size(9.0)
                                 .color(crate::MUTED),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let search_width = ui.available_width().clamp(180.0, 340.0);
                         let response = ui.add_sized(
-                            [240.0, 30.0],
+                            [search_width, 34.0],
                             egui::TextEdit::singleline(&mut self.query)
                                 .hint_text("Поиск по имени или пути…"),
                         );
@@ -1256,44 +941,82 @@ impl ScannerApp {
                     .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
-                        ui.columns(5, |columns| {
-                            Self::stat_cell(
-                                &mut columns[0],
-                                "ФАЙЛОВ",
-                                format_count(self.stats.files),
-                                crate::BLUE,
-                            );
-                            Self::stat_cell(
-                                &mut columns[1],
-                                "ОБЪЁМ",
-                                format!(
-                                    "{} / {}",
+                        if ui.available_width() >= 850.0 {
+                            ui.columns(5, |columns| {
+                                Self::stat_cell(
+                                    &mut columns[0],
+                                    "НАЙДЕНО ФАЙЛОВ",
+                                    format_count(self.stats.files),
+                                    crate::BLUE,
+                                );
+                                Self::stat_cell(
+                                    &mut columns[1],
+                                    "ЗАНЯТО НА ДИСКЕ",
+                                    format!(
+                                        "{} / {}",
+                                        format_bytes(self.stats.bytes),
+                                        self.scan_total_bytes
+                                            .map(format_bytes)
+                                            .unwrap_or_else(|| "—".to_owned())
+                                    ),
+                                    Color32::from_rgb(244, 174, 91),
+                                );
+                                Self::stat_cell(
+                                    &mut columns[2],
+                                    "СКАНИРОВАНИЕ",
+                                    format_duration(self.elapsed),
+                                    crate::MUTED,
+                                );
+                                Self::stat_cell(
+                                    &mut columns[3],
+                                    "СКОРОСТЬ",
+                                    format!("{}/с", format_count(speed as u64)),
+                                    Color32::from_rgb(91, 201, 151),
+                                );
+                                Self::stat_cell(
+                                    &mut columns[4],
+                                    "МОЖНО ОСВОБОДИТЬ",
+                                    format_bytes(self.analysis.cleanup_bytes),
+                                    Color32::from_rgb(91, 201, 151),
+                                );
+                            });
+                        } else {
+                            ui.columns(3, |columns| {
+                                Self::stat_cell(
+                                    &mut columns[0],
+                                    "ФАЙЛОВ",
+                                    format_count(self.stats.files),
+                                    crate::BLUE,
+                                );
+                                Self::stat_cell(
+                                    &mut columns[1],
+                                    "СКАНИРОВАНИЕ",
+                                    format_duration(self.elapsed),
+                                    crate::MUTED,
+                                );
+                                Self::stat_cell(
+                                    &mut columns[2],
+                                    "МОЖНО ОСВОБОДИТЬ",
+                                    format_bytes(self.analysis.cleanup_bytes),
+                                    Color32::from_rgb(91, 201, 151),
+                                );
+                            });
+                            ui.add_space(8.0);
+                            ui.columns(2, |columns| {
+                                Self::stat_cell(
+                                    &mut columns[0],
+                                    "ОБЪЁМ",
                                     format_bytes(self.stats.bytes),
-                                    self.scan_total_bytes
-                                        .map(format_bytes)
-                                        .unwrap_or_else(|| "—".to_owned())
-                                ),
-                                Color32::from_rgb(244, 174, 91),
-                            );
-                            Self::stat_cell(
-                                &mut columns[2],
-                                "ВРЕМЯ",
-                                format_duration(self.elapsed),
-                                crate::MUTED,
-                            );
-                            Self::stat_cell(
-                                &mut columns[3],
-                                "СКОРОСТЬ",
-                                format!("{}/с", format_count(speed as u64)),
-                                Color32::from_rgb(91, 201, 151),
-                            );
-                            Self::stat_cell(
-                                &mut columns[4],
-                                "МОЖНО ОСВОБОДИТЬ",
-                                format_bytes(self.analysis.cleanup_bytes),
-                                Color32::from_rgb(91, 201, 151),
-                            );
-                        });
+                                    Color32::from_rgb(244, 174, 91),
+                                );
+                                Self::stat_cell(
+                                    &mut columns[1],
+                                    "СКОРОСТЬ",
+                                    format!("{}/с", format_count(speed as u64)),
+                                    Color32::from_rgb(91, 201, 151),
+                                );
+                            });
+                        }
                     });
                 ui.add_space(12.0);
 
@@ -1354,77 +1077,100 @@ impl ScannerApp {
                     format_count(self.visible.len() as u64)
                 };
                 let can_delete = self.file_index.is_some();
+                let selected = self
+                    .selected_rows
+                    .iter()
+                    .copied()
+                    .filter(|index| {
+                        self.files
+                            .get(*index)
+                            .is_some_and(|file| !file.deleted)
+                    })
+                    .collect::<Vec<_>>();
+                let selected_bytes = selected.iter().fold(0_u64, |total, index| {
+                    total.saturating_add(self.files[*index].size)
+                });
                 egui::Frame::new()
-                    .fill(crate::SURFACE)
-                    .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
-                    .inner_margin(egui::Margin::symmetric(10, 7))
+                    .fill(if selected.is_empty() {
+                        crate::SURFACE
+                    } else {
+                        Color32::from_rgb(20, 36, 55)
+                    })
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        if selected.is_empty() {
+                            crate::LINE
+                        } else {
+                            crate::BLUE
+                        },
+                    ))
+                    .inner_margin(egui::Margin::symmetric(12, 9))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} / {} ОБЪЕКТОВ / ПОКАЗАНО {}",
-                                    self.view.label().to_uppercase(),
-                                    result_count,
-                                    self.visible.len()
-                                ))
-                                .size(9.0)
-                                .color(crate::INK),
-                            );
+                            ui.vertical(|ui| {
+                                if selected.is_empty() {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} · {} ОБЪЕКТОВ",
+                                            self.view.label().to_uppercase(),
+                                            result_count
+                                        ))
+                                        .size(10.0)
+                                        .strong()
+                                        .color(crate::INK),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Показано {} · клик по строке выбирает файл",
+                                            self.visible.len()
+                                        ))
+                                        .size(8.0)
+                                        .color(crate::MUTED),
+                                    );
+                                } else {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "ВЫБРАНО {} · {}",
+                                            selected.len(),
+                                            format_bytes(selected_bytes)
+                                        ))
+                                        .size(11.0)
+                                        .strong()
+                                        .color(crate::INK),
+                                    );
+                                    ui.label(
+                                        RichText::new("Файлы будут перемещены в корзину")
+                                            .size(8.0)
+                                            .color(crate::MUTED),
+                                    );
+                                }
+                            });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.label(
-                                        RichText::new("СТОЛБЦЫ  8/8").size(8.0).color(crate::MUTED),
-                                    );
-                                    if !self.selected_rows.is_empty() {
-                                        let selected = self
-                                            .selected_rows
-                                            .iter()
-                                            .copied()
-                                            .filter(|index| {
-                                                self.files
-                                                    .get(*index)
-                                                    .is_some_and(|file| !file.deleted)
-                                            })
-                                            .collect::<Vec<_>>();
+                                    if !selected.is_empty() {
                                         if ui
                                             .add_enabled(
                                                 can_delete && !selected.is_empty(),
-                                                egui::Button::new(format!(
-                                                    "В КОРЗИНУ {}",
-                                                    selected.len()
-                                                )),
+                                                egui::Button::new("В КОРЗИНУ")
+                                                    .fill(crate::BLUE)
+                                                    .min_size(egui::vec2(132.0, 34.0)),
                                             )
                                             .on_disabled_hover_text(
                                                 "Доступно после подготовки списка",
                                             )
                                             .clicked()
                                         {
-                                            self.pending_bulk_delete = Some(selected);
+                                            self.pending_bulk_delete = Some(selected.clone());
                                         }
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "ВЫДЕЛЕНО  {}",
-                                                self.selected_rows.len()
-                                            ))
-                                            .size(8.0)
-                                            .strong()
-                                            .color(crate::BLUE),
-                                        );
                                         if ui.small_button("Снять").clicked() {
                                             self.selected_rows.clear();
                                             self.selection_anchor = None;
                                         }
-                                    }
-                                    if ui.small_button("Выбрать все").clicked() {
+                                    } else if ui.button("ВЫБРАТЬ ВСЕ").clicked() {
                                         self.selected_rows = self.visible.iter().copied().collect();
                                         self.selection_anchor = None;
                                     }
-                                    ui.label(
-                                        RichText::new("Клик: сортировка / повторный клик: порядок")
-                                            .size(8.0)
-                                            .color(crate::MUTED),
-                                    );
                                 },
                             );
                         });
@@ -1437,27 +1183,78 @@ impl ScannerApp {
                     .copied()
                     .collect::<Vec<_>>();
                 let table_width = ui.available_width();
-                let fixed_width = 560.0;
-                let flexible_width = (table_width - fixed_width).max(168.0);
-                let name_width = flexible_width * 0.40;
-                let path_width = flexible_width - name_width;
+                let show_reason = table_width >= 930.0;
+                let show_modified = table_width >= 790.0;
+                let show_status = table_width >= 1080.0;
+                let fixed_width = 30.0
+                    + 92.0
+                    + 82.0
+                    + 48.0
+                    + if show_reason { 190.0 } else { 0.0 }
+                    + if show_modified { 122.0 } else { 0.0 }
+                    + if show_status { 96.0 } else { 0.0 };
+                let file_width = (table_width - fixed_width - 12.0).max(190.0);
                 let table_height = ui.available_height();
                 let scroll_output = ScrollArea::vertical()
                     .id_salt(("file-table", self.list_revision))
                     .auto_shrink([false, false])
                     .max_height(table_height)
                     .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
                         ui.set_min_width(table_width);
                         ui.set_min_height(table_height);
                         ui.horizontal(|ui| {
-                            self.header_cell(ui, "ДАТА", 96.0, Some(SortMode::Modified));
-                            self.header_cell(ui, "ТИП", 48.0, None);
-                            self.header_cell(ui, "ФАЙЛ", name_width, Some(SortMode::Name));
-                            self.header_cell(ui, "ПУТЬ", path_width, None);
-                            self.header_cell(ui, "ОЦЕНКА", 78.0, Some(SortMode::Assessment));
-                            self.header_cell(ui, "ПОЧЕМУ", 136.0, None);
-                            self.header_cell(ui, "РАЗМЕР", 78.0, Some(SortMode::Size));
-                            self.header_cell(ui, "ДЕЙСТВИЯ", 56.0, None);
+                            let visible_rows = self
+                                .visible
+                                .iter()
+                                .copied()
+                                .filter(|index| {
+                                    self.files
+                                        .get(*index)
+                                        .is_some_and(|file| !file.deleted)
+                                })
+                                .collect::<Vec<_>>();
+                            let mut all_selected = !visible_rows.is_empty()
+                                && visible_rows
+                                    .iter()
+                                    .all(|index| self.selected_rows.contains(index));
+                            let select_all_response = ui
+                                .allocate_ui_with_layout(
+                                    egui::vec2(30.0, 28.0),
+                                    egui::Layout::centered_and_justified(
+                                        egui::Direction::LeftToRight,
+                                    ),
+                                    |ui| ui.checkbox(&mut all_selected, ""),
+                                )
+                                .inner;
+                            if select_all_response.changed() {
+                                if all_selected {
+                                    self.selected_rows.extend(visible_rows);
+                                } else {
+                                    for index in visible_rows {
+                                        self.selected_rows.remove(&index);
+                                    }
+                                    self.selection_anchor = None;
+                                }
+                            }
+                            self.header_cell(ui, "ФАЙЛ И ПУТЬ", file_width, Some(SortMode::Name));
+                            self.header_cell(ui, "КАТЕГОРИЯ", 92.0, None);
+                            if show_reason {
+                                self.header_cell(ui, "ПОЧЕМУ НАЙДЕН", 190.0, None);
+                            }
+                            if show_modified {
+                                self.header_cell(ui, "ИЗМЕНЁН", 122.0, Some(SortMode::Modified));
+                            }
+                            self.header_cell(ui, "РАЗМЕР", 82.0, Some(SortMode::Size));
+                            if show_status {
+                                self.header_cell(
+                                    ui,
+                                    "СТАТУС",
+                                    96.0,
+                                    Some(SortMode::Assessment),
+                                );
+                            }
+                            self.header_cell(ui, "", 48.0, None);
                         });
                         ui.separator();
                         for index in row_indices {
@@ -1476,10 +1273,19 @@ impl ScannerApp {
                                 .unwrap_or_else(|| "—".to_owned());
                             let extension = format!("[{}]", file_extension(&path));
                             let modified = format_modified(file.modified);
+                            let age = format_file_age(file.modified);
                             let score = file.cleanup_score();
                             let reason = file.cleanup_reason();
+                            let category = file.cleanup.category.label();
                             let size = format_bytes(file.size);
-                            let (_, score_color) = assessment_label(score);
+                            let (status, score_color) = assessment_label(score);
+                            let recommendation = if score >= 80 {
+                                "Безопасно удалить"
+                            } else if score >= crate::CLEANUP_SCORE_THRESHOLD {
+                                "Проверьте перед удалением"
+                            } else {
+                                "Обычный файл"
+                            };
                             let row_rect = egui::Frame::new()
                                 .fill(if selected {
                                     Color32::from_rgb(25, 43, 66)
@@ -1489,63 +1295,125 @@ impl ScannerApp {
                                 .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
                                 .inner_margin(egui::Margin::symmetric(4, 3))
                                 .show(ui, |ui| {
-                                    ui.set_min_height(31.0);
+                                    ui.set_min_height(50.0);
                                     ui.horizontal(|ui| {
-                                        ui.add_sized(
-                                            [96.0, 24.0],
-                                            egui::Label::new(
-                                                RichText::new(modified)
-                                                    .monospace()
-                                                    .size(9.0)
-                                                    .color(crate::MUTED),
-                                            ),
-                                        );
-                                        ui.add_sized(
-                                            [48.0, 24.0],
-                                            egui::Label::new(
-                                                RichText::new(extension)
-                                                    .monospace()
-                                                    .size(9.0)
-                                                    .color(crate::BLUE),
-                                            ),
-                                        );
-                                        ui.add_sized(
-                                            [name_width, 24.0],
-                                            egui::Label::new(
-                                                RichText::new(name).size(10.0).color(crate::INK),
+                                        let mut checked = selected;
+                                        let checkbox = ui
+                                            .allocate_ui_with_layout(
+                                                egui::vec2(30.0, 46.0),
+                                                egui::Layout::centered_and_justified(
+                                                    egui::Direction::LeftToRight,
+                                                ),
+                                                |ui| ui.checkbox(&mut checked, ""),
                                             )
-                                            .truncate(),
+                                            .inner;
+                                        if checkbox.changed() {
+                                            if checked {
+                                                self.selected_rows.insert(index);
+                                                self.selection_anchor = Some(index);
+                                            } else {
+                                                self.selected_rows.remove(&index);
+                                                if self.selection_anchor == Some(index) {
+                                                    self.selection_anchor = None;
+                                                }
+                                            }
+                                        }
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(file_width, 46.0),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new(&extension)
+                                                            .monospace()
+                                                            .size(9.0)
+                                                            .color(crate::BLUE),
+                                                    );
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&name)
+                                                                .size(10.0)
+                                                                .strong()
+                                                                .color(crate::INK),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                });
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(&parent)
+                                                            .monospace()
+                                                            .size(8.0)
+                                                            .color(crate::MUTED),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            },
                                         )
+                                        .response
                                         .on_hover_text(&full_path);
-                                        ui.add_sized(
-                                            [path_width, 24.0],
-                                            egui::Label::new(
-                                                RichText::new(parent)
-                                                    .monospace()
-                                                    .size(9.0)
-                                                    .color(crate::MUTED),
-                                            )
-                                            .truncate(),
-                                        )
-                                        .on_hover_text(&full_path);
-                                        ui.add_sized(
-                                            [78.0, 24.0],
-                                            egui::Label::new(
-                                                RichText::new(format!("{score} / 100"))
-                                                    .strong()
-                                                    .size(9.0)
-                                                    .color(score_color),
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(92.0, 46.0),
+                                            egui::Layout::centered_and_justified(
+                                                egui::Direction::LeftToRight,
                                             ),
+                                            |ui| {
+                                                egui::Frame::new()
+                                                    .fill(score_color.gamma_multiply(0.12))
+                                                    .stroke(egui::Stroke::new(1.0_f32, score_color))
+                                                    .corner_radius(3.0)
+                                                    .inner_margin(egui::Margin::symmetric(7, 4))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            RichText::new(category)
+                                                                .size(8.0)
+                                                                .color(score_color),
+                                                        );
+                                                    });
+                                            },
                                         );
+                                        if show_reason {
+                                            ui.allocate_ui_with_layout(
+                                                egui::vec2(190.0, 46.0),
+                                                egui::Layout::top_down(egui::Align::Min),
+                                                |ui| {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&reason)
+                                                                .size(9.0)
+                                                                .color(crate::INK),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(recommendation)
+                                                            .size(8.0)
+                                                            .color(score_color),
+                                                    );
+                                                },
+                                            );
+                                        }
+                                        if show_modified {
+                                            ui.allocate_ui_with_layout(
+                                                egui::vec2(122.0, 46.0),
+                                                egui::Layout::top_down(egui::Align::Min),
+                                                |ui| {
+                                                    ui.label(
+                                                        RichText::new(&modified)
+                                                            .monospace()
+                                                            .size(8.0)
+                                                            .color(crate::INK),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(&age)
+                                                            .size(8.0)
+                                                            .color(crate::MUTED),
+                                                    );
+                                                },
+                                            );
+                                        }
                                         ui.add_sized(
-                                            [136.0, 24.0],
-                                            egui::Label::new(
-                                                RichText::new(reason).size(9.0).color(score_color),
-                                            )
-                                            .truncate(),
-                                        );
-                                        ui.add_sized(
-                                            [78.0, 24.0],
+                                            [82.0, 46.0],
                                             egui::Label::new(
                                                 RichText::new(size)
                                                     .monospace()
@@ -1554,8 +1422,25 @@ impl ScannerApp {
                                                     .color(crate::INK),
                                             ),
                                         );
+                                        if show_status {
+                                            ui.allocate_ui_with_layout(
+                                                egui::vec2(96.0, 46.0),
+                                                egui::Layout::centered_and_justified(
+                                                    egui::Direction::LeftToRight,
+                                                ),
+                                                |ui| {
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{status}\n{score} / 100"
+                                                        ))
+                                                        .size(8.0)
+                                                        .color(score_color),
+                                                    );
+                                                },
+                                            );
+                                        }
                                         ui.allocate_ui_with_layout(
-                                            egui::Vec2::new(56.0, 24.0),
+                                            egui::Vec2::new(48.0, 46.0),
                                             egui::Layout::left_to_right(egui::Align::Center),
                                             |ui| {
                                                 ui.menu_button("•••", |ui| {
@@ -1568,9 +1453,9 @@ impl ScannerApp {
                                 .response
                                 .rect;
                             let selection_rect = egui::Rect::from_min_max(
-                                row_rect.min,
+                                egui::pos2(row_rect.min.x + 34.0, row_rect.min.y),
                                 egui::pos2(
-                                    (row_rect.max.x - 64.0).max(row_rect.min.x),
+                                    (row_rect.max.x - 52.0).max(row_rect.min.x + 34.0),
                                     row_rect.max.y,
                                 ),
                             );
@@ -1578,7 +1463,26 @@ impl ScannerApp {
                                 selection_rect,
                                 ui.id().with(("file-row", index)),
                                 egui::Sense::click(),
-                            );
+                            )
+                            .on_hover_ui(|ui| {
+                                ui.label(
+                                    RichText::new(&name).strong().color(crate::INK),
+                                );
+                                ui.label(
+                                    RichText::new(&full_path)
+                                        .monospace()
+                                        .size(9.0)
+                                        .color(crate::MUTED),
+                                );
+                                ui.separator();
+                                ui.label(format!("Категория: {category}"));
+                                ui.label(format!("Почему найден: {reason}"));
+                                ui.label(format!("Изменён: {modified} · {age}"));
+                                ui.label(
+                                    RichText::new(format!("{status} · {score} / 100"))
+                                        .color(score_color),
+                                );
+                            });
                             selection_response.context_menu(|ui| {
                                 self.row_context_menu(ui, index);
                             });
@@ -1615,376 +1519,6 @@ impl ScannerApp {
                     self.load_visible_page();
                     ctx.request_repaint();
                 }
-            });
-    }
-
-    fn image_search_panel(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(crate::CANVAS)
-                    .inner_margin(egui::Margin::same(18)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("VISUAL SEARCH").size(17.0).color(crate::INK));
-                        ui.label(
-                            RichText::new(format!(
-                                "ЛОКАЛЬНО · MOBILECLIP2-S0 · {}",
-                                self.image_accelerator.to_uppercase()
-                            ))
-                            .size(8.0)
-                            .color(crate::MUTED),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("ВЕРНУТЬСЯ К ФАЙЛАМ").clicked() {
-                            self.image_search_open = false;
-                        }
-                    });
-                });
-                ui.add_space(14.0);
-
-                if self.image_indexing {
-                    let complete = self.image_index_stats.processed
-                        + self.image_index_stats.cached
-                        + self.image_index_stats.failed;
-                    let fraction = if self.image_index_stats.total == 0 {
-                        0.0
-                    } else {
-                        complete as f32 / self.image_index_stats.total as f32
-                    };
-                    let elapsed = self
-                        .image_index_started
-                        .map_or(Duration::ZERO, |started| started.elapsed());
-                    let speed = if elapsed.as_secs_f64() > 0.0 {
-                        complete as f64 / elapsed.as_secs_f64()
-                    } else {
-                        0.0
-                    };
-                    let eta = if speed > 0.0 {
-                        Duration::from_secs_f64(
-                            self.image_index_stats.total.saturating_sub(complete) as f64 / speed,
-                        )
-                    } else {
-                        Duration::ZERO
-                    };
-                    egui::Frame::new()
-                        .fill(crate::SURFACE)
-                        .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
-                        .inner_margin(egui::Margin::symmetric(14, 11))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("ВИЗУАЛЬНЫЙ ИНДЕКС")
-                                        .size(9.0)
-                                        .strong()
-                                        .color(crate::BLUE),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{} / {} · {}/с · ETA {} · КЭШ {} · ОШИБКИ {}",
-                                                format_count(complete),
-                                                format_count(self.image_index_stats.total),
-                                                format_count(speed.round() as u64),
-                                                format_duration(eta),
-                                                format_count(self.image_index_stats.cached),
-                                                format_count(self.image_index_stats.failed)
-                                            ))
-                                            .size(9.0)
-                                            .color(crate::MUTED),
-                                        );
-                                    },
-                                );
-                            });
-                            ui.add(
-                                egui::ProgressBar::new(fraction)
-                                    .fill(crate::BLUE)
-                                    .desired_height(5.0),
-                            );
-                        });
-                    ui.add_space(12.0);
-                }
-
-                let mut requested_mode = None;
-                egui::Frame::new()
-                    .fill(crate::SURFACE)
-                    .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
-                    .inner_margin(egui::Margin::same(14))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let preview_size = egui::vec2(196.0, 132.0);
-                            if let Some(texture) = self.image_query_texture.clone() {
-                                ui.add(
-                                    egui::Image::new((texture.id(), texture.size_vec2()))
-                                        .fit_to_exact_size(preview_size)
-                                        .corner_radius(3.0),
-                                );
-                            } else {
-                                let (rect, _) =
-                                    ui.allocate_exact_size(preview_size, egui::Sense::hover());
-                                ui.painter().rect_filled(rect, 3.0, crate::SURFACE_ALT);
-                                ui.painter().rect_stroke(
-                                    rect,
-                                    3.0,
-                                    egui::Stroke::new(1.0_f32, crate::LINE),
-                                    egui::StrokeKind::Inside,
-                                );
-                                ui.painter().text(
-                                    rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "ПЕРЕТАЩИТЕ ВЗГЛЯД\nНА ЭТАЛОН",
-                                    egui::FontId::monospace(10.0),
-                                    crate::MUTED,
-                                );
-                            }
-                            ui.add_space(14.0);
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    RichText::new("ЭТАЛОННОЕ ИЗОБРАЖЕНИЕ")
-                                        .size(9.0)
-                                        .strong()
-                                        .color(crate::BLUE),
-                                );
-                                ui.add_space(5.0);
-                                let reference = self
-                                    .image_query_path
-                                    .as_deref()
-                                    .map(short_path)
-                                    .unwrap_or_else(|| {
-                                        "Выберите JPEG, PNG или WebP для сравнения".to_owned()
-                                    });
-                                ui.add_sized(
-                                    [ui.available_width().min(560.0), 36.0],
-                                    egui::Label::new(
-                                        RichText::new(reference)
-                                            .size(11.0)
-                                            .color(crate::INK),
-                                    )
-                                    .wrap(),
-                                );
-                                ui.add_space(7.0);
-                                if ui
-                                    .add_enabled(
-                                        self.image_engine.is_some(),
-                                        egui::Button::new("ВЫБРАТЬ ФОТО  →")
-                                            .fill(crate::BLUE)
-                                            .min_size(egui::vec2(168.0, 34.0)),
-                                    )
-                                    .on_disabled_hover_text(
-                                        "Сначала завершите сканирование и визуальную индексацию",
-                                    )
-                                    .clicked()
-                                {
-                                    self.choose_reference_image();
-                                }
-                                ui.add_space(10.0);
-                                ui.horizontal(|ui| {
-                                    for mode in [
-                                        ImageSearchMode::Semantic,
-                                        ImageSearchMode::NearVisual,
-                                    ] {
-                                        let selected = self.image_search_mode == mode;
-                                        let button = egui::Button::new(
-                                            RichText::new(mode.label()).size(10.0).color(
-                                                if selected {
-                                                    Color32::WHITE
-                                                } else {
-                                                    crate::MUTED
-                                                },
-                                            ),
-                                        )
-                                        .fill(if selected {
-                                            Color32::from_rgb(27, 49, 76)
-                                        } else {
-                                            crate::SURFACE_ALT
-                                        })
-                                        .stroke(egui::Stroke::new(
-                                            1.0_f32,
-                                            if selected { crate::BLUE } else { crate::LINE },
-                                        ));
-                                        if ui.add(button).clicked() && !selected {
-                                            requested_mode = Some(mode);
-                                        }
-                                    }
-                                });
-                            });
-                        });
-                    });
-                if let Some(mode) = requested_mode {
-                    self.image_search_mode = mode;
-                    self.start_image_search();
-                }
-
-                ui.add_space(14.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "РЕЗУЛЬТАТЫ / {}",
-                            format_count(self.image_hits.len() as u64)
-                        ))
-                        .size(9.0)
-                        .strong()
-                        .color(crate::INK),
-                    );
-                    if self.image_searching {
-                        ui.spinner();
-                        ui.label(
-                            RichText::new("Модель сравнивает изображение…")
-                                .size(9.0)
-                                .color(crate::MUTED),
-                        );
-                    }
-                });
-                ui.add_space(8.0);
-
-                if self.image_engine.is_none() && !self.image_indexing {
-                    self.image_empty_state(
-                        ui,
-                        "СНАЧАЛА СОЗДАЙТЕ ИНДЕКС",
-                        "Завершите сканирование, затем нажмите «Индексировать фото» в боковой панели.",
-                    );
-                } else if self.image_query_path.is_none() {
-                    self.image_empty_state(
-                        ui,
-                        "ВЫБЕРИТЕ ФОТОГРАФИЮ",
-                        "Эталон обрабатывается один раз, затем поиск идёт по готовому локальному индексу.",
-                    );
-                } else if self.image_hits.is_empty() && !self.image_searching {
-                    self.image_empty_state(
-                        ui,
-                        "ПОХОЖИХ ФОТО НЕ НАЙДЕНО",
-                        "Попробуйте режим «По содержимому» или выберите другой эталон.",
-                    );
-                } else {
-                    let hits = self.image_hits.clone();
-                    ScrollArea::vertical()
-                        .id_salt("visual-results")
-                        .show(ui, |ui| {
-                            for row in hits.chunks(3) {
-                                ui.columns(3, |columns| {
-                                    for (column, hit) in row.iter().enumerate() {
-                                        self.image_result_card(&mut columns[column], hit);
-                                    }
-                                });
-                                ui.add_space(8.0);
-                            }
-                        });
-                }
-            });
-    }
-
-    fn image_empty_state(&self, ui: &mut egui::Ui, title: &str, description: &str) {
-        egui::Frame::new()
-            .fill(crate::SURFACE)
-            .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
-            .inner_margin(egui::Margin::same(26))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.vertical_centered(|ui| {
-                    ui.add_space(18.0);
-                    ui.label(RichText::new(title).size(11.0).strong().color(crate::MUTED));
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(description).size(11.0).color(crate::MUTED));
-                    ui.add_space(18.0);
-                });
-            });
-    }
-
-    fn image_result_card(&mut self, ui: &mut egui::Ui, hit: &ImageSearchHit) {
-        let Some(file) = self.files.get(hit.file_index) else {
-            return;
-        };
-        let path = file.path.clone();
-        let name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("—")
-            .to_owned();
-        let texture = self.image_result_textures.get(&hit.file_index).cloned();
-        let score = (hit.score * 100.0).round().clamp(0.0, 100.0) as u8;
-        let kind = match hit.match_kind {
-            ImageMatchKind::NearVisual => "ВИЗУАЛЬНАЯ КОПИЯ",
-            ImageMatchKind::Semantic => "ПО СОДЕРЖИМОМУ",
-        };
-        egui::Frame::new()
-            .fill(crate::SURFACE)
-            .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
-            .corner_radius(3.0)
-            .inner_margin(egui::Margin::same(10))
-            .show(ui, |ui| {
-                let image_size = egui::vec2(ui.available_width(), 124.0);
-                if let Some(texture) = texture {
-                    ui.add(
-                        egui::Image::new((texture.id(), texture.size_vec2()))
-                            .fit_to_exact_size(image_size)
-                            .corner_radius(2.0),
-                    );
-                } else {
-                    let (rect, _) = ui.allocate_exact_size(image_size, egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 2.0, crate::SURFACE_ALT);
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "ЗАГРУЗКА",
-                        egui::FontId::monospace(9.0),
-                        crate::MUTED,
-                    );
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(kind).size(8.0).strong().color(crate::BLUE));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("{score}%"))
-                                .size(11.0)
-                                .strong()
-                                .color(crate::INK),
-                        );
-                    });
-                });
-                let (bar, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), 4.0),
-                    egui::Sense::hover(),
-                );
-                ui.painter().rect_filled(bar, 2.0, crate::SURFACE_ALT);
-                let filled = egui::Rect::from_min_size(
-                    bar.min,
-                    egui::vec2(bar.width() * hit.score.clamp(0.0, 1.0), bar.height()),
-                );
-                ui.painter().rect_filled(filled, 2.0, crate::BLUE);
-                ui.add_space(6.0);
-                ui.add(
-                    egui::Label::new(RichText::new(name).size(11.0).color(crate::INK)).truncate(),
-                );
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(short_path(&path))
-                            .monospace()
-                            .size(8.0)
-                            .color(crate::MUTED),
-                    )
-                    .truncate(),
-                );
-                ui.add_space(5.0);
-                ui.horizontal(|ui| {
-                    if ui.small_button("ОТКРЫТЬ").clicked() {
-                        self.notice = Some(match open_path(&path) {
-                            Ok(()) => ("Файл открыт".to_owned(), false, Instant::now()),
-                            Err(error) => (error, true, Instant::now()),
-                        });
-                    }
-                    if ui.small_button("В ПАПКЕ").clicked() {
-                        self.notice = Some(match reveal_in_file_manager(&path) {
-                            Ok(()) => ("Папка открыта".to_owned(), false, Instant::now()),
-                            Err(error) => (error, true, Instant::now()),
-                        });
-                    }
-                });
             });
     }
 
@@ -2176,25 +1710,17 @@ impl ScannerApp {
 impl eframe::App for ScannerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_keyboard_shortcuts(ctx);
-        self.handle_dropped_reference(ctx);
         self.poll_scan();
         self.poll_index();
-        self.poll_image_index();
-        self.poll_image_search(ctx);
         if self.scanning {
             if let Some(started) = self.started_at {
                 self.elapsed = started.elapsed();
             }
             ctx.request_repaint_after(Duration::from_millis(100));
         }
-        if self.image_indexing || self.image_searching {
-            ctx.request_repaint_after(Duration::from_millis(50));
-        }
         self.sidebar(ctx);
         if self.games_open {
             self.games_panel(ctx);
-        } else if self.image_search_open {
-            self.image_search_panel(ctx);
         } else {
             self.central_panel(ctx);
         }

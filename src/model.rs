@@ -1,7 +1,6 @@
 use crate::CLEANUP_SCORE_THRESHOLD;
 use crate::cleanup::{assessment_from_rating, rate_cleanup_candidate};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 #[derive(Clone)]
@@ -26,77 +25,6 @@ pub(crate) struct ScanStats {
 pub(crate) enum ScanMessage {
     Batch(Vec<FileEntry>, ScanStats),
     Finished(ScanStats, bool),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ImageSearchMode {
-    NearVisual,
-    Semantic,
-}
-
-impl ImageSearchMode {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::NearVisual => "Визуальные копии",
-            Self::Semantic => "По содержимому",
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct ImageSearchRequest {
-    pub(crate) path: PathBuf,
-    pub(crate) mode: ImageSearchMode,
-    pub(crate) limit: usize,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ImageMatchKind {
-    NearVisual,
-    Semantic,
-}
-
-#[derive(Clone)]
-pub(crate) struct ImageSearchHit {
-    pub(crate) file_index: usize,
-    pub(crate) score: f32,
-    pub(crate) match_kind: ImageMatchKind,
-}
-
-#[derive(Clone)]
-pub(crate) struct PixelImage {
-    pub(crate) width: usize,
-    pub(crate) height: usize,
-    pub(crate) rgba: Vec<u8>,
-}
-
-pub(crate) trait ImageSearchEngine: Send + Sync {
-    fn search(&self, request: &ImageSearchRequest) -> Result<Vec<ImageSearchHit>, String>;
-    fn image_count(&self) -> usize;
-    fn accelerator(&self) -> String;
-}
-
-#[derive(Default, Clone, Copy)]
-pub(crate) struct ImageIndexStats {
-    pub(crate) total: u64,
-    pub(crate) processed: u64,
-    pub(crate) cached: u64,
-    pub(crate) failed: u64,
-}
-
-pub(crate) enum ImageIndexMessage {
-    Progress(ImageIndexStats, String),
-    Ready(Arc<dyn ImageSearchEngine>, ImageIndexStats),
-    Failed(String),
-    Cancelled,
-}
-
-pub(crate) enum ImageSearchMessage {
-    Results(Vec<ImageSearchHit>, Option<PixelImage>),
-    Thumbnail(usize, PixelImage),
-    Finished,
-    Failed(String),
-    Cancelled,
 }
 
 #[derive(Default, Clone, Copy)]

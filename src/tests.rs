@@ -3,12 +3,9 @@ use crate::app::read_saved_root;
 use crate::filtering::{file_matches, file_matches_category};
 use crate::index::FileIndex;
 use crate::model::{CleanupCategory, FileEntry, SortMode, SortRule, ViewMode};
-use crate::visual_index::{
-    is_supported_image, model_input_for_test, perceptual_hash_for_test, semantic_embedding_for_test,
-};
-use image::{DynamicImage, ImageBuffer, Rgb};
+use crate::ui::format_file_age;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[test]
 fn file_filter_combines_query_and_size_bounds() {
@@ -163,52 +160,11 @@ fn saved_root_is_used_only_while_directory_exists() {
     std::fs::remove_dir_all(&base).expect("test directory must be removed");
 }
 
-fn patterned_image(width: u32, height: u32) -> DynamicImage {
-    DynamicImage::ImageRgb8(ImageBuffer::from_fn(width, height, |x, y| {
-        let cell = ((x / 8) + (y / 8)) % 2;
-        if cell == 0 {
-            Rgb([230, (x % 255) as u8, 35])
-        } else {
-            Rgb([20, 80, (y % 255) as u8])
-        }
-    }))
-}
-
 #[test]
-fn visual_index_accepts_only_v1_image_formats() {
-    assert!(is_supported_image(&PathBuf::from("photo.JPEG")));
-    assert!(is_supported_image(&PathBuf::from("photo.png")));
-    assert!(is_supported_image(&PathBuf::from("photo.webp")));
-    assert!(!is_supported_image(&PathBuf::from("photo.heic")));
-    assert!(!is_supported_image(&PathBuf::from("notes.txt")));
-}
-
-#[test]
-fn perceptual_hash_survives_resize() {
-    let source = patterned_image(96, 64);
-    let resized = source.resize_exact(384, 256, image::imageops::FilterType::Lanczos3);
-    let distance =
-        (perceptual_hash_for_test(&source) ^ perceptual_hash_for_test(&resized)).count_ones();
-    assert!(distance <= 2, "unexpected Hamming distance: {distance}");
-}
-
-#[test]
-fn mobileclip_input_has_expected_shape_and_range() {
-    let input = model_input_for_test(&patterned_image(96, 64));
-    assert_eq!(input.len(), 3 * 256 * 256);
-    assert!(input.iter().all(|value| value.is_finite()));
-    assert!(input.iter().all(|value| (0.0..=1.0).contains(value)));
-}
-
-#[test]
-fn bundled_mobileclip_returns_normalized_embedding() {
-    let embedding = semantic_embedding_for_test(&patterned_image(96, 64))
-        .expect("bundled MobileCLIP model must run");
-    assert_eq!(embedding.len(), 512);
-    let norm = embedding
-        .iter()
-        .map(|value| value * value)
-        .sum::<f32>()
-        .sqrt();
-    assert!((norm - 1.0).abs() < 1e-4, "embedding norm: {norm}");
+fn file_age_uses_readable_russian_units() {
+    assert_eq!(format_file_age(None), "возраст неизвестен");
+    assert_eq!(
+        format_file_age(Some(SystemTime::now() - Duration::from_secs(2 * 86_400))),
+        "2 дня назад"
+    );
 }

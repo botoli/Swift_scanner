@@ -20,7 +20,6 @@ mod index;
 mod model;
 mod scanner;
 mod ui;
-mod visual_index;
 
 #[cfg(test)]
 mod tests;
