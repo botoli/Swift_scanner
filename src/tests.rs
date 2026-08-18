@@ -1,4 +1,5 @@
 use crate::CLEANUP_SCORE_THRESHOLD;
+use crate::app::read_saved_root;
 use crate::filtering::{file_matches, file_matches_category};
 use crate::index::FileIndex;
 use crate::model::{CleanupCategory, FileEntry, SortMode, SortRule, ViewMode};
@@ -7,6 +8,7 @@ use crate::visual_index::{
 };
 use image::{DynamicImage, ImageBuffer, Rgb};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn file_filter_combines_query_and_size_bounds() {
@@ -120,6 +122,25 @@ fn own_index_filters_cleanup_category() {
 
     assert_eq!(result, vec![0]);
     assert!(!has_more);
+}
+
+#[test]
+fn saved_root_is_used_only_while_directory_exists() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock must be after Unix epoch")
+        .as_nanos();
+    let base = std::env::temp_dir().join(format!("swiftscan-root-test-{unique}"));
+    let root = base.join("scan-root");
+    let config = base.join("last_root.txt");
+    std::fs::create_dir_all(&root).expect("test root must be created");
+    std::fs::write(&config, root.to_string_lossy().as_bytes())
+        .expect("test config must be written");
+
+    assert_eq!(read_saved_root(&config), Some(root.clone()));
+    std::fs::remove_dir_all(&root).expect("test root must be removed");
+    assert_eq!(read_saved_root(&config), None);
+    std::fs::remove_dir_all(&base).expect("test directory must be removed");
 }
 
 fn patterned_image(width: u32, height: u32) -> DynamicImage {

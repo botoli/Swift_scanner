@@ -9,12 +9,66 @@ use crate::ui::*;
 use crate::visual_index::{build_image_index, is_supported_image, run_image_search};
 use eframe::egui::{self, Color32, RichText, ScrollArea};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
+
+fn last_root_config_path() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|path| path.join("SwiftScan").join("last_root.txt"))
+}
+
+pub(crate) fn read_saved_root(config_path: &Path) -> Option<PathBuf> {
+    let root = PathBuf::from(std::fs::read_to_string(config_path).ok()?.trim());
+    root.is_dir().then_some(root)
+}
+
+fn system_drive_root() -> PathBuf {
+    let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_owned());
+    PathBuf::from(format!("{}\\", drive.trim_end_matches(['\\', '/'])))
+}
+
+fn default_scan_root() -> PathBuf {
+    last_root_config_path()
+        .as_deref()
+        .and_then(read_saved_root)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .filter(|path| path.is_dir())
+        .or_else(|| {
+            let root = system_drive_root();
+            root.is_dir().then_some(root)
+        })
+        .unwrap_or_else(|| PathBuf::from(r"C:\"))
+}
+
+fn save_scan_root(root: &Path) -> std::io::Result<()> {
+    let Some(config_path) = last_root_config_path() else {
+        return Ok(());
+    };
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(config_path, root.to_string_lossy().as_bytes())
+}
+
+fn scan_root_presets() -> Vec<(&'static str, PathBuf)> {
+    let mut presets = vec![("C:\\", system_drive_root())];
+    if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+        presets.push(("Дом", home.clone()));
+        presets.push(("Загрузки", home.join("Downloads")));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        presets.push(("Temp", local.join("Temp")));
+    }
+    presets
+        .into_iter()
+        .filter(|(_, path)| path.is_dir())
+        .collect()
+}
 
 pub(crate) fn run() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -84,7 +138,7 @@ struct ScannerApp {
 impl ScannerApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         configure_style(&cc.egui_ctx);
-        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("C:\\"));
+        let root = default_scan_root();
         let scan_total_bytes = scan_target_capacity(&root);
         Self {
             root,
@@ -147,12 +201,21 @@ impl ScannerApp {
             .pick_folder()
         {
             self.root = folder;
-            self.scan_total_bytes = scan_target_capacity(&self.root);
+            self.start_scan();
         }
     }
 
     fn start_scan(&mut self) {
+        if !self.root.is_dir() {
+            self.notice = Some((
+                "Папка недоступна или не существует".to_owned(),
+                true,
+                Instant::now(),
+            ));
+            return;
+        }
         self.cancel_jobs();
+        let _ = save_scan_root(&self.root);
         self.files = Arc::new(Vec::new());
         self.visible.clear();
         self.scan_preview_all.clear();
@@ -656,6 +719,19 @@ impl ScannerApp {
                                     self.choose_folder();
                                 }
                             });
+                        ui.add_space(6.0);
+                        let mut requested_root = None;
+                        ui.horizontal_wrapped(|ui| {
+                            for (label, path) in scan_root_presets() {
+                                if ui.small_button(label).clicked() {
+                                    requested_root = Some(path);
+                                }
+                            }
+                        });
+                        if let Some(root) = requested_root {
+                            self.root = root;
+                            self.start_scan();
+                        }
                         ui.add_space(20.0);
                         ui.label(
                             RichText::new("РАЗМЕР ФАЙЛОВ")
@@ -1204,6 +1280,45 @@ impl ScannerApp {
                         });
                     });
                 ui.add_space(12.0);
+
+                if self.files.is_empty() && !self.scanning {
+                    ui.add_space(42.0);
+                    ui.vertical_centered(|ui| {
+                        egui::Frame::new()
+                            .fill(crate::SURFACE)
+                            .stroke(egui::Stroke::new(1.0_f32, crate::LINE))
+                            .inner_margin(egui::Margin::symmetric(28, 24))
+                            .show(ui, |ui| {
+                                ui.set_max_width(460.0);
+                                ui.label(
+                                    RichText::new("ВЫБЕРИТЕ ОБЛАСТЬ ДЛЯ ПОИСКА")
+                                        .size(12.0)
+                                        .strong()
+                                        .color(crate::INK),
+                                );
+                                ui.add_space(7.0);
+                                ui.label(
+                                    RichText::new(
+                                        "SwiftScan найдёт крупные файлы и безопасные кандидаты на очистку.",
+                                    )
+                                    .size(11.0)
+                                    .color(crate::MUTED),
+                                );
+                                ui.add_space(14.0);
+                                if ui
+                                    .add(
+                                        egui::Button::new("ВЫБРАТЬ ПАПКУ  →")
+                                            .fill(crate::BLUE)
+                                            .min_size(egui::vec2(190.0, 38.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.choose_folder();
+                                }
+                            });
+                    });
+                    return;
+                }
 
                 let unfiltered = self.query.trim().is_empty()
                     && self.min_mb.trim().is_empty()
