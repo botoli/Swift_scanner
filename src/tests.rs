@@ -2,7 +2,7 @@ use crate::CLEANUP_SCORE_THRESHOLD;
 use crate::app::read_saved_root;
 use crate::filtering::{file_matches, file_matches_category};
 use crate::index::FileIndex;
-use crate::model::{CleanupCategory, FileEntry, SortMode, SortRule, ViewMode};
+use crate::model::{CleanupCategory, FileEntry, FileScopeFilter, SortMode, SortRule, ViewMode};
 use crate::ui::format_file_age;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,9 +19,22 @@ fn file_filter_combines_query_and_size_bounds() {
         "cache",
         (100 * 1024 * 1024, 200 * 1024 * 1024),
         ViewMode::All,
+        FileScopeFilter::All,
     ));
-    assert!(!file_matches(&file, "photo", (0, u64::MAX), ViewMode::All));
-    assert!(file_matches(&file, "", (0, u64::MAX), ViewMode::Cleanup));
+    assert!(!file_matches(
+        &file,
+        "photo",
+        (0, u64::MAX),
+        ViewMode::All,
+        FileScopeFilter::All,
+    ));
+    assert!(file_matches(
+        &file,
+        "",
+        (0, u64::MAX),
+        ViewMode::Cleanup,
+        FileScopeFilter::All,
+    ));
 }
 
 #[test]
@@ -35,12 +48,14 @@ fn dot_query_matches_file_extension_not_directory_name() {
         ".iso",
         (0, u64::MAX),
         ViewMode::All,
+        FileScopeFilter::All,
     ));
     assert!(file_matches(
         &disk_image,
         ".iso",
         (0, u64::MAX),
         ViewMode::All,
+        FileScopeFilter::All,
     ));
 }
 
@@ -70,6 +85,7 @@ fn own_index_finds_path_substrings_and_keeps_size_order() {
         "reports",
         (0, u64::MAX),
         ViewMode::All,
+        FileScopeFilter::All,
         None,
         SortRule {
             mode: SortMode::Size,
@@ -85,6 +101,7 @@ fn own_index_finds_path_substrings_and_keeps_size_order() {
         "reports",
         (0, u64::MAX),
         ViewMode::All,
+        FileScopeFilter::All,
         None,
         SortRule {
             mode: SortMode::Size,
@@ -118,6 +135,79 @@ fn category_filter_matches_only_cleanup_candidates() {
 }
 
 #[test]
+fn file_scope_separates_protected_and_user_files() {
+    let system = FileEntry::new(
+        PathBuf::from(r"C:\Windows\System32\kernel-component.dll"),
+        2_000,
+        None,
+    );
+    let user = FileEntry::new(
+        PathBuf::from(r"C:\Users\Test\Downloads\movie.mp4"),
+        1_000,
+        None,
+    );
+
+    assert!(file_matches(
+        &system,
+        "",
+        (0, u64::MAX),
+        ViewMode::All,
+        FileScopeFilter::System,
+    ));
+    assert!(!file_matches(
+        &system,
+        "",
+        (0, u64::MAX),
+        ViewMode::All,
+        FileScopeFilter::User,
+    ));
+    assert!(file_matches(
+        &user,
+        "",
+        (0, u64::MAX),
+        ViewMode::All,
+        FileScopeFilter::User,
+    ));
+    assert!(file_matches(
+        &user,
+        "",
+        (0, u64::MAX),
+        ViewMode::All,
+        FileScopeFilter::All,
+    ));
+}
+
+#[test]
+fn own_index_combines_scope_query_size_and_sorting() {
+    let files = vec![
+        FileEntry::new(
+            PathBuf::from(r"C:\Windows\System32\shared.dll"),
+            4_000,
+            None,
+        ),
+        FileEntry::new(PathBuf::from(r"C:\Users\Test\shared.mp4"), 3_000, None),
+        FileEntry::new(PathBuf::from(r"C:\Users\Test\small-shared.txt"), 100, None),
+    ];
+    let index = FileIndex::build(&files);
+    let (result, has_more) = index.query_page(
+        &files,
+        "shared",
+        (1_000, u64::MAX),
+        ViewMode::All,
+        FileScopeFilter::User,
+        None,
+        SortRule {
+            mode: SortMode::Size,
+            descending: true,
+        },
+        50,
+    );
+
+    assert_eq!(result, vec![1]);
+    assert!(!has_more);
+}
+
+#[test]
 fn own_index_filters_cleanup_category() {
     let files = vec![
         FileEntry::new(PathBuf::from(r"C:\Data\Cache\large.bin"), 2_000, None),
@@ -129,6 +219,7 @@ fn own_index_filters_cleanup_category() {
         "",
         (0, u64::MAX),
         ViewMode::Cleanup,
+        FileScopeFilter::All,
         Some(CleanupCategory::Cache),
         SortRule {
             mode: SortMode::Size,

@@ -1,10 +1,13 @@
-use crate::model::{CleanupCategory, FileEntry, SortMode, SortRule, ViewMode};
+use crate::model::{
+    Assessment, CleanupCategory, FileEntry, FileScopeFilter, SortMode, SortRule, ViewMode,
+};
 
 pub(crate) fn file_matches(
     file: &FileEntry,
     query: &str,
     bounds: (u64, u64),
     view: ViewMode,
+    scope: FileScopeFilter,
 ) -> bool {
     !file.deleted
         && file.size >= bounds.0
@@ -12,6 +15,11 @@ pub(crate) fn file_matches(
         && match view {
             ViewMode::All => true,
             ViewMode::Cleanup => file.is_cleanup_candidate(),
+        }
+        && match scope {
+            FileScopeFilter::All => true,
+            FileScopeFilter::System => file.assessment == Assessment::Protected,
+            FileScopeFilter::User => file.assessment != Assessment::Protected,
         }
         && if query.is_empty() {
             true

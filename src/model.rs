@@ -39,6 +39,13 @@ pub(crate) enum ViewMode {
     Cleanup,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileScopeFilter {
+    All,
+    System,
+    User,
+}
+
 impl ViewMode {
     pub(crate) fn label(self) -> &'static str {
         match self {

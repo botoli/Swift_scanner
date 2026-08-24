@@ -12,20 +12,30 @@ pub(crate) fn configure_style(ctx: &egui::Context) {
     style.visuals.window_fill = SURFACE;
     style.visuals.extreme_bg_color = CANVAS;
     style.visuals.faint_bg_color = SURFACE_ALT;
+    style.visuals.selection.bg_fill = Color32::from_rgb(27, 62, 105);
+    style.visuals.selection.stroke = Stroke::new(1.0_f32, crate::BLUE);
+    style.visuals.widgets.inactive.bg_fill = SURFACE_ALT;
+    style.visuals.widgets.inactive.weak_bg_fill = SURFACE_ALT;
+    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(28, 43, 61);
+    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(28, 43, 61);
+    style.visuals.widgets.active.bg_fill = Color32::from_rgb(31, 55, 86);
     style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, LINE);
-    style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+    style.spacing.item_spacing = Vec2::new(8.0, 7.0);
+    style.spacing.button_padding = Vec2::new(10.0, 6.0);
+    style.spacing.interact_size.y = 32.0;
+    style.visuals.window_corner_radius = 7.0.into();
     style
         .text_styles
-        .insert(egui::TextStyle::Body, FontId::proportional(14.0));
+        .insert(egui::TextStyle::Body, FontId::proportional(13.0));
     ctx.set_style(style);
 }
 
 pub(crate) fn assessment_label(score: u8) -> (&'static str, Color32) {
     match score {
-        80..=u8::MAX => ("УДАЛИТЬ", Color32::from_rgb(91, 201, 151)),
-        55..=79 => ("ОЧИСТКА", Color32::from_rgb(244, 174, 91)),
-        30..=54 => ("ПРОВЕРИТЬ", Color32::from_rgb(92, 159, 255)),
-        _ => ("ОБЫЧНЫЙ", MUTED),
+        80..=u8::MAX => ("Удалить", Color32::from_rgb(91, 201, 151)),
+        55..=79 => ("Очистка", Color32::from_rgb(244, 174, 91)),
+        30..=54 => ("Проверить", Color32::from_rgb(92, 159, 255)),
+        _ => ("Обычный", MUTED),
     }
 }
 

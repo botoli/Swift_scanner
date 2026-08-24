@@ -1,5 +1,5 @@
 use crate::filtering::{file_matches, file_matches_category};
-use crate::model::{CleanupCategory, FileEntry, SortMode, SortRule, ViewMode};
+use crate::model::{CleanupCategory, FileEntry, FileScopeFilter, SortMode, SortRule, ViewMode};
 use std::collections::{HashMap, HashSet};
 
 /// Immutable in-memory index used by every search and sort request after a scan.
@@ -61,11 +61,12 @@ impl FileIndex {
         query: &str,
         bounds: (u64, u64),
         view: ViewMode,
+        scope: FileScopeFilter,
         category: Option<CleanupCategory>,
         sort: SortRule,
         limit: usize,
     ) -> (Vec<usize>, bool) {
-        self.query_with_limit(files, query, bounds, view, category, sort, limit)
+        self.query_with_limit(files, query, bounds, view, scope, category, sort, limit)
     }
 
     fn query_with_limit(
@@ -74,6 +75,7 @@ impl FileIndex {
         query: &str,
         bounds: (u64, u64),
         view: ViewMode,
+        scope: FileScopeFilter,
         category: Option<CleanupCategory>,
         sort: SortRule,
         limit: usize,
@@ -104,7 +106,7 @@ impl FileIndex {
         for index in iterator
             .filter(|index| candidate_set.as_ref().is_none_or(|set| set.contains(index)))
             .copied()
-            .filter(|index| file_matches(&files[*index], &normalized, bounds, view))
+            .filter(|index| file_matches(&files[*index], &normalized, bounds, view, scope))
             .filter(|index| file_matches_category(&files[*index], category))
         {
             if result.len() >= limit {
